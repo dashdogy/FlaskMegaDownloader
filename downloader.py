@@ -161,6 +161,31 @@ def cleanup_paths_created_since(root: Path, before_snapshot: set[str]) -> list[P
     return removed_paths
 
 
+def find_megacmd_companion_binary(primary_binary: str, companion_name: str) -> str | None:
+    candidates: list[Path | str] = []
+    resolved_primary = shutil.which(primary_binary)
+    if resolved_primary:
+        primary_path = Path(resolved_primary)
+        candidates.append(primary_path.with_name(f"{companion_name}{primary_path.suffix}"))
+        candidates.append(primary_path.with_name(companion_name))
+
+    primary_path = Path(primary_binary)
+    if primary_path.name:
+        candidates.append(primary_path.with_name(f"{companion_name}{primary_path.suffix}"))
+        candidates.append(primary_path.with_name(companion_name))
+
+    candidates.extend([companion_name, f"{companion_name}.bat"])
+
+    for candidate in candidates:
+        candidate_text = str(candidate)
+        if Path(candidate_text).exists():
+            return candidate_text
+        resolved = shutil.which(candidate_text)
+        if resolved:
+            return resolved
+    return None
+
+
 def parse_progress_line(line: str) -> dict:
     update: dict = {}
     size_tokens: list[int] = []
@@ -683,6 +708,36 @@ class DownloadManager:
                 return key, relative_to_root(root, destination_path)
         return None, ""
 
+    def _cancel_active_mega_downloads(self) -> None:
+        if self.backend_name != "mega":
+            return
+
+        transfers_binary = find_megacmd_companion_binary(self.megacmd_binary, "mega-transfers")
+        if not transfers_binary:
+            return
+
+        try:
+            subprocess.run(
+                [transfers_binary, "-c", "-a", "--only-downloads"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _request_cancel_locked(self, job_id: str) -> Job:
+        job = self._require_job(job_id)
+        cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
+        cancel_event.set()
+        self._cancel_active_mega_downloads()
+        process = self._active_processes.get(job_id)
+        if process and process.poll() is None:
+            process.terminate()
+        return job
+
     def cancel_job(self, job_id: str) -> Job:
         with self._lock:
             job = self._require_job(job_id)
@@ -694,12 +749,7 @@ class DownloadManager:
                 self._persist_locked(force=True)
                 return job
 
-            cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
-            cancel_event.set()
-            process = self._active_processes.get(job_id)
-            if process and process.poll() is None:
-                process.terminate()
-            return job
+            return self._request_cancel_locked(job_id)
 
     def clear_queue(self) -> dict[str, int]:
         with self._lock:
@@ -709,11 +759,7 @@ class DownloadManager:
                 if job.status in ACTIVE_JOB_STATUSES:
                     canceling += 1
                     self._purge_on_finish.add(job_id)
-                    cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
-                    cancel_event.set()
-                    process = self._active_processes.get(job_id)
-                    if process and process.poll() is None:
-                        process.terminate()
+                    self._request_cancel_locked(job_id)
                     continue
 
                 removed += 1
