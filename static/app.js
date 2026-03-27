@@ -10,6 +10,49 @@
     const backendNote = document.getElementById("backend-note");
     const updatedLabel = document.getElementById("dashboard-updated");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
+    const scrollStorageKey = `dashboard-scroll:${window.location.pathname}`;
+
+    const rememberScrollPosition = () => {
+        try {
+            sessionStorage.setItem(scrollStorageKey, JSON.stringify({ top: window.scrollY }));
+        } catch (error) {
+            console.debug("Scroll position could not be saved", error);
+        }
+    };
+
+    const restoreScrollPosition = () => {
+        try {
+            const savedValue = sessionStorage.getItem(scrollStorageKey);
+            if (!savedValue) {
+                return;
+            }
+            sessionStorage.removeItem(scrollStorageKey);
+            const savedState = JSON.parse(savedValue);
+            const top = Number(savedState?.top);
+            if (!Number.isFinite(top) || top < 0) {
+                return;
+            }
+            window.requestAnimationFrame(() => {
+                window.requestAnimationFrame(() => {
+                    window.scrollTo(0, top);
+                });
+            });
+        } catch (error) {
+            console.debug("Scroll position could not be restored", error);
+        }
+    };
+
+    document.addEventListener("submit", (event) => {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) {
+            return;
+        }
+        const method = (form.getAttribute("method") || "get").toLowerCase();
+        if (method !== "post") {
+            return;
+        }
+        rememberScrollPosition();
+    }, true);
 
     const escapeHtml = (value) => String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -291,5 +334,6 @@
     };
 
     renderDashboard(JSON.parse(initialPayload.textContent));
+    restoreScrollPosition();
     window.setInterval(poll, pollMs);
 })();
