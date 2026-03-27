@@ -12,7 +12,7 @@ SERVICE_DEST="/etc/systemd/system/${SERVICE_NAME}.service"
 RUNTIME_USER="www-data"
 RUNTIME_GROUP="www-data"
 RUNTIME_HOME="/var/www"
-MEGA_KEYRING="/usr/share/keyrings/mega.gpg"
+MEGA_KEYRING="/usr/share/keyrings/meganz-archive-keyring.gpg"
 MEGA_SOURCE_LIST="/etc/apt/sources.list.d/megacmd.list"
 
 log() {
@@ -62,6 +62,57 @@ apt_install_base() {
   log "Installing base packages."
   apt-get update
   apt-get install -y ca-certificates curl git gnupg python3 python3-venv python3-pip
+}
+
+strip_mega_lines_from_list() {
+  local file="$1"
+  local tmp_file
+
+  tmp_file="$(mktemp)"
+  grep -v 'https://mega.nz/linux/repo/' "${file}" > "${tmp_file}" || true
+
+  if [[ -s "${tmp_file}" ]]; then
+    cat "${tmp_file}" > "${file}"
+  else
+    rm -f "${file}"
+  fi
+  rm -f "${tmp_file}"
+}
+
+normalize_mega_apt_sources() {
+  local file
+
+  log "Normalizing any existing MEGA APT source entries."
+
+  if [[ -f /etc/apt/sources.list ]] && grep -q 'https://mega.nz/linux/repo/' /etc/apt/sources.list; then
+    strip_mega_lines_from_list /etc/apt/sources.list
+    warn "Removed MEGA repository lines from /etc/apt/sources.list."
+  fi
+
+  shopt -s nullglob
+  for file in /etc/apt/sources.list.d/*; do
+    [[ -f "${file}" ]] || continue
+    [[ "${file}" == "${MEGA_SOURCE_LIST}" ]] && continue
+    if ! grep -q 'https://mega.nz/linux/repo/' "${file}"; then
+      continue
+    fi
+
+    case "${file}" in
+      *.list)
+        strip_mega_lines_from_list "${file}"
+        warn "Removed conflicting MEGA repository lines from ${file}."
+        ;;
+      *.sources)
+        rm -f "${file}"
+        warn "Removed conflicting MEGA repository source file ${file}."
+        ;;
+      *)
+        rm -f "${file}"
+        warn "Removed conflicting MEGA repository file ${file}."
+        ;;
+    esac
+  done
+  shopt -u nullglob
 }
 
 install_megacmd() {
@@ -233,6 +284,7 @@ main() {
   require_systemd
   detect_os
   log "Starting Flask Mega Downloader install/update on ${OS_FRIENDLY_NAME}."
+  normalize_mega_apt_sources
   apt_install_base
   install_megacmd
   prepare_checkout
