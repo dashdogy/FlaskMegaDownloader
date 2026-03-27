@@ -281,7 +281,7 @@ button:disabled {
 }
 
 .backend-callout {
-    margin-top: 18px;
+    margin: 0 0 18px;
     padding: 16px 18px;
     border-radius: 20px;
     background: linear-gradient(135deg, rgba(67, 115, 157, 0.08), rgba(255, 255, 255, 0.8));

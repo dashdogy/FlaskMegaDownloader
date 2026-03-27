@@ -12,6 +12,10 @@
     const bulkPauseToggleButton = document.getElementById("bulk-pause-toggle");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
     const scrollStorageKey = `dashboard-scroll:${window.location.pathname}`;
+    const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+    });
 
     const rememberScrollPosition = () => {
         try {
@@ -95,6 +99,17 @@
             return `${minutes}m ${seconds}s`;
         }
         return `${seconds}s`;
+    };
+
+    const formatTimestamp = (value) => {
+        if (!value) {
+            return "Unknown";
+        }
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) {
+            return String(value);
+        }
+        return dateTimeFormatter.format(parsed);
     };
 
     const clampPercent = (value) => {
@@ -309,7 +324,7 @@
             backendNote.textContent = payload.backend.reason || "";
         }
         if (updatedLabel) {
-            updatedLabel.textContent = `Updated ${payload.updated_at}`;
+            updatedLabel.textContent = `Updated ${formatTimestamp(payload.updated_at)}`;
         }
         if (bulkPauseToggleButton && payload.bulk_pause_toggle) {
             bulkPauseToggleButton.textContent = payload.bulk_pause_toggle.label;

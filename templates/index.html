@@ -40,11 +40,6 @@ https://mega.nz/folder/..."></textarea>
                     <button type="submit" formaction="{{ url_for('add_favorite') }}" formmethod="post" class="secondary-button" {% if not has_destinations %}disabled{% endif %}>
                         Add To Favorites
                     </button>
-                    {% if has_destinations %}
-                        <a class="ghost-button" href="{{ url_for('explorer') }}">Open Explorer</a>
-                    {% else %}
-                        <span class="ghost-button is-disabled">Open Explorer</span>
-                    {% endif %}
                 </div>
             </div>
         </form>
@@ -52,6 +47,13 @@ https://mega.nz/folder/..."></textarea>
 
     <article class="card info-card">
         <p class="eyebrow">Environment</p>
+        <div class="backend-callout">
+            <span>Downloader backend</span>
+            <strong id="backend-label">{{ dashboard.backend.label }}</strong>
+        </div>
+        <p class="subtle backend-note" id="backend-note">
+            {% if dashboard.backend.reason %}{{ dashboard.backend.reason }}{% endif %}
+        </p>
         <h2>Configured destinations</h2>
         <div class="destination-stack">
             {% if destinations %}
@@ -80,13 +82,6 @@ https://mega.nz/folder/..."></textarea>
                 <button type="submit" class="secondary-button">Restore Configured Destinations</button>
             </form>
         {% endif %}
-        <div class="backend-callout">
-            <span>Downloader backend</span>
-            <strong id="backend-label">{{ dashboard.backend.label }}</strong>
-        </div>
-        <p class="subtle backend-note" id="backend-note">
-            {% if dashboard.backend.reason %}{{ dashboard.backend.reason }}{% endif %}
-        </p>
     </article>
 </section>
 
@@ -96,7 +91,7 @@ https://mega.nz/folder/..."></textarea>
             <p class="eyebrow">Live Summary</p>
             <h2>Queue health</h2>
         </div>
-        <p class="subtle" id="dashboard-updated">Updated {{ dashboard.updated_at }}</p>
+        <p class="subtle" id="dashboard-updated">Updated {{ dashboard.updated_at|datetime_local }}</p>
     </div>
     <div id="summary-grid" class="stat-grid"></div>
 </section>
