@@ -93,6 +93,8 @@ def create_app() -> Flask:
             "app_title": "Flask Mega Downloader",
             "poll_interval_ms": app.config["POLL_INTERVAL_MS"],
             "destinations": manager.destination_options(),
+            "has_destinations": manager.has_destinations(),
+            "can_restore_base_destinations": manager.can_restore_base_destinations(),
         }
 
     @app.get("/")
@@ -137,6 +139,24 @@ def create_app() -> Flask:
             flash(f"Destination already exists in the dropdown: {favorite['path']}", "success")
         return redirect(url_for("dashboard"))
 
+    @app.post("/destinations/<destination_key>/delete")
+    def delete_destination(destination_key: str):
+        try:
+            deleted = manager.delete_destination(destination_key)
+            flash(f"Deleted {deleted['type']} destination: {deleted['label']}.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/destinations/restore")
+    def restore_destinations():
+        restored = manager.restore_hidden_base_destinations()
+        if restored:
+            flash(f"Restored {restored} configured destination(s).", "success")
+        else:
+            flash("There were no hidden configured destinations to restore.", "success")
+        return redirect(request.referrer or url_for("dashboard"))
+
     @app.get("/api/jobs")
     def api_jobs():
         return jsonify(manager.dashboard_payload())
@@ -175,6 +195,9 @@ def create_app() -> Flask:
     @app.get("/explorer")
     def explorer():
         destination_options = manager.destination_options()
+        if not destination_options:
+            flash("No destinations are configured. Restore or add one before opening the explorer.", "error")
+            return redirect(url_for("dashboard"))
         requested_root = request.args.get("root") or destination_options[0]["key"]
         requested_path = request.args.get("path", "")
         sort_by = request.args.get("sort", "name")
@@ -188,6 +211,8 @@ def create_app() -> Flask:
     @app.get("/api/explorer")
     def api_explorer():
         destination_options = manager.destination_options()
+        if not destination_options:
+            return jsonify({"error": "No destinations are configured."}), 400
         requested_root = request.args.get("root") or destination_options[0]["key"]
         requested_path = request.args.get("path", "")
         sort_by = request.args.get("sort", "name")

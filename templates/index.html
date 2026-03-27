@@ -16,10 +16,14 @@ https://mega.nz/folder/..."></textarea>
             <div class="form-row">
                 <div class="destination-fields">
                     <label for="destination">Destination</label>
-                    <select id="destination" name="destination">
-                        {% for destination in destinations %}
-                            <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
-                        {% endfor %}
+                    <select id="destination" name="destination" {% if not has_destinations %}disabled{% endif %}>
+                        {% if has_destinations %}
+                            {% for destination in destinations %}
+                                <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
+                            {% endfor %}
+                        {% else %}
+                            <option value="">No destinations configured</option>
+                        {% endif %}
                     </select>
                     <label for="destination_path">Destination Path</label>
                     <input
@@ -32,11 +36,15 @@ https://mega.nz/folder/..."></textarea>
                     <p class="subtle form-hint">Use a relative path for a subfolder inside the selected root, or an absolute path for another mounted disk. Add a custom path to favorites only after it is writable by the app user.</p>
                 </div>
                 <div class="button-row">
-                    <button type="submit">Start Queue</button>
-                    <button type="submit" formaction="{{ url_for('add_favorite') }}" formmethod="post" class="secondary-button">
+                    <button type="submit" {% if not has_destinations %}disabled{% endif %}>Start Queue</button>
+                    <button type="submit" formaction="{{ url_for('add_favorite') }}" formmethod="post" class="secondary-button" {% if not has_destinations %}disabled{% endif %}>
                         Add To Favorites
                     </button>
-                    <a class="ghost-button" href="{{ url_for('explorer') }}">Open Explorer</a>
+                    {% if has_destinations %}
+                        <a class="ghost-button" href="{{ url_for('explorer') }}">Open Explorer</a>
+                    {% else %}
+                        <span class="ghost-button is-disabled">Open Explorer</span>
+                    {% endif %}
                 </div>
             </div>
         </form>
@@ -46,13 +54,32 @@ https://mega.nz/folder/..."></textarea>
         <p class="eyebrow">Environment</p>
         <h2>Configured destinations</h2>
         <div class="destination-stack">
-            {% for destination in destinations %}
-                <a href="{{ url_for('explorer', root=destination.key) }}" class="destination-pill">
-                    <span>{{ destination.label }}{% if destination.favorite %} (Favorite){% endif %}</span>
-                    <small>{{ destination.path }}</small>
-                </a>
-            {% endfor %}
+            {% if destinations %}
+                {% for destination in destinations %}
+                    <div class="destination-pill">
+                        <a href="{{ url_for('explorer', root=destination.key) }}" class="destination-link">
+                            <span>{{ destination.label }}{% if destination.favorite %} (Favorite){% endif %}</span>
+                            <small>{{ destination.path }}</small>
+                        </a>
+                        <form action="{{ url_for('delete_destination', destination_key=destination.key) }}" method="post" class="inline-form">
+                            <button type="submit" class="danger-button compact-button" {% if not destination.deletable %}disabled{% endif %}>
+                                Delete
+                            </button>
+                        </form>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="destination-empty">
+                    <strong>No destinations configured</strong>
+                    <p class="subtle">Restore a configured destination or update the app config before submitting downloads.</p>
+                </div>
+            {% endif %}
         </div>
+        {% if can_restore_base_destinations %}
+            <form action="{{ url_for('restore_destinations') }}" method="post" class="inline-form restore-form">
+                <button type="submit" class="secondary-button">Restore Configured Destinations</button>
+            </form>
+        {% endif %}
         <div class="backend-callout">
             <span>Downloader backend</span>
             <strong id="backend-label">{{ dashboard.backend.label }}</strong>

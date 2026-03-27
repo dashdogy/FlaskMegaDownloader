@@ -185,8 +185,23 @@ button,
     box-shadow: 0 10px 20px rgba(45, 86, 125, 0.2);
 }
 
+.destination-link {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
 .ghost-button {
     color: var(--text);
+}
+
+.ghost-button.is-disabled,
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+    box-shadow: none;
 }
 
 .secondary-button {
@@ -228,11 +243,24 @@ button,
 .destination-pill {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     gap: 12px;
     padding: 14px 16px;
     border-radius: 20px;
     background: rgba(240, 246, 251, 0.92);
     border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.destination-empty {
+    padding: 16px 18px;
+    border-radius: 20px;
+    background: rgba(240, 246, 251, 0.92);
+    border: 1px dashed rgba(67, 115, 157, 0.18);
+}
+
+.destination-empty strong {
+    display: block;
+    margin-bottom: 6px;
 }
 
 .destination-pill small,
@@ -252,6 +280,10 @@ button,
 
 .backend-note {
     margin: 10px 2px 0;
+}
+
+.restore-form {
+    margin-top: 14px;
 }
 
 .section-heading {
@@ -434,6 +466,10 @@ button,
 .danger-button {
     background: linear-gradient(135deg, #cf7a83 0%, var(--danger) 100%);
     color: white;
+}
+
+.compact-button {
+    padding: 10px 14px;
 }
 
 .flash-stack {

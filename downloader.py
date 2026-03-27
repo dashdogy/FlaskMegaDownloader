@@ -424,6 +424,7 @@ class DownloadManager:
         self.storage = storage
         self.base_destinations = normalize_destinations(destinations)
         self.favorite_destinations: dict[str, dict] = {}
+        self.hidden_base_destination_keys: set[str] = set()
         self.destinations = dict(self.base_destinations)
         self.megacmd_binary = megacmd_binary
         self.backend_name = backend
@@ -439,6 +440,7 @@ class DownloadManager:
         self._jobs: dict[str, Job] = {}
         self.backend_reason: str | None = None
         self.adapter = self._select_adapter()
+        self._load_hidden_base_destinations()
         self._load_favorites()
         self._load_jobs()
         self._worker.start()
@@ -484,8 +486,19 @@ class DownloadManager:
                 }
             self._refresh_destinations()
 
+    def _load_hidden_base_destinations(self) -> None:
+        hidden_keys = self.storage.load_hidden_base_destinations()
+        with self._lock:
+            self.hidden_base_destination_keys = {key for key in hidden_keys if key in self.base_destinations}
+            self._refresh_destinations()
+
     def _refresh_destinations(self) -> None:
-        self.destinations = {**self.base_destinations, **self.favorite_destinations}
+        visible_base_destinations = {
+            key: value
+            for key, value in self.base_destinations.items()
+            if key not in self.hidden_base_destination_keys
+        }
+        self.destinations = {**visible_base_destinations, **self.favorite_destinations}
 
     def _favorite_models(self) -> list[FavoriteDestination]:
         return [
@@ -503,15 +516,25 @@ class DownloadManager:
         for cancel_event in self._cancel_events.values():
             cancel_event.set()
 
+    def has_destinations(self) -> bool:
+        return bool(self.destinations)
+
+    def can_restore_base_destinations(self) -> bool:
+        return bool(self.hidden_base_destination_keys)
+
     def destination_options(self) -> list[dict]:
         options: list[dict] = []
-        for item in self.base_destinations.values():
+        total_destinations = len(self.destinations)
+        for key, item in self.base_destinations.items():
+            if key in self.hidden_base_destination_keys:
+                continue
             options.append(
                 {
                     "key": item["key"],
                     "label": item["label"],
                     "path": str(item["path"]),
                     "favorite": False,
+                    "deletable": total_destinations > 1,
                 }
             )
         for item in self.favorite_destinations.values():
@@ -521,6 +544,7 @@ class DownloadManager:
                     "label": item["label"],
                     "path": str(item["path"]),
                     "favorite": True,
+                    "deletable": total_destinations > 1,
                 }
             )
         return options
@@ -545,6 +569,8 @@ class DownloadManager:
     def submit(self, urls: list[str], destination_key: str, destination_subpath: str = "") -> list[Job]:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
+        if not self.destinations:
+            raise ValueError("No destinations are configured. Restore or add a destination before submitting downloads.")
         destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
         ensure_destination_writable(destination_path)
         batch_id = uuid.uuid4().hex[:12]
@@ -570,6 +596,8 @@ class DownloadManager:
         return new_jobs
 
     def add_favorite_destination(self, destination_key: str, destination_input: str) -> dict:
+        if not self.destinations:
+            raise ValueError("No destinations are configured. Restore a destination before adding a favorite.")
         destination_path, _, _ = self.resolve_destination(destination_key, destination_input)
         ensure_destination_writable(destination_path)
 
@@ -603,8 +631,49 @@ class DownloadManager:
                 "created": True,
             }
 
+    def delete_destination(self, destination_key: str) -> dict:
+        with self._lock:
+            if destination_key not in self.destinations:
+                raise ValueError(f"Unknown destination '{destination_key}'.")
+            if len(self.destinations) <= 1:
+                raise ValueError("At least one destination must remain. Restore or add another destination before deleting this one.")
+            if any(
+                job.destination_key == destination_key and job.status in {"queued", *ACTIVE_JOB_STATUSES}
+                for job in self._jobs.values()
+            ):
+                raise ValueError("That destination is still in use by a queued or active job.")
+
+            destination = self.destinations[destination_key]
+            if destination_key in self.favorite_destinations:
+                self.favorite_destinations.pop(destination_key, None)
+                deleted_type = "favorite"
+            else:
+                self.hidden_base_destination_keys.add(destination_key)
+                deleted_type = "configured"
+
+            self._refresh_destinations()
+            self._persist_locked(force=True)
+            return {
+                "key": destination_key,
+                "label": destination["label"],
+                "path": str(destination["path"]),
+                "type": deleted_type,
+            }
+
+    def restore_hidden_base_destinations(self) -> int:
+        with self._lock:
+            restored = len(self.hidden_base_destination_keys)
+            if not restored:
+                return 0
+            self.hidden_base_destination_keys.clear()
+            self._refresh_destinations()
+            self._persist_locked(force=True)
+            return restored
+
     def build_explorer_target(self, job: Job) -> tuple[str | None, str]:
         if not job.destination_is_custom:
+            if job.destination_key not in self.destinations:
+                return None, ""
             return job.destination_key, job.destination_relative_path
 
         destination_path = Path(job.destination_path).expanduser().resolve()
@@ -927,7 +996,11 @@ class DownloadManager:
         now = time.monotonic()
         if not force and now - self._last_persist < 0.5:
             return
-        self.storage.save_state(self._jobs.values(), self._favorite_models())
+        self.storage.save_state(
+            self._jobs.values(),
+            self._favorite_models(),
+            self.hidden_base_destination_keys,
+        )
         self._last_persist = now
 
     def _require_job(self, job_id: str) -> Job:
