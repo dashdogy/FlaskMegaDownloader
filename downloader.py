@@ -282,6 +282,24 @@ def find_megacmd_companion_binary(primary_binary: str, companion_name: str) -> s
     return None
 
 
+def run_megacmd_transfers_command(primary_binary: str, action_flag: str) -> None:
+    transfers_binary = find_megacmd_companion_binary(primary_binary, "mega-transfers")
+    if not transfers_binary:
+        return
+
+    try:
+        subprocess.run(
+            [transfers_binary, action_flag, "-a", "--only-downloads"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def parse_progress_line(line: str) -> dict:
     update: dict = {}
     size_tokens: list[int] = []
@@ -518,6 +536,15 @@ class MegaDownloader:
         progress_callback(status="starting", message=f"Launching {self.binary_name}.")
         saw_progress = False
         discovered_display_name = False
+        real_progress_seen = threading.Event()
+        auto_kick_stop = threading.Event()
+        auto_kick_thread = threading.Thread(
+            target=self._auto_restart_if_stalled,
+            args=(process, cancel_event, pause_event, real_progress_seen, auto_kick_stop),
+            name=f"mega-autokick-{job.id[:8]}",
+            daemon=True,
+        )
+        auto_kick_thread.start()
 
         try:
             if process.stdout is not None:
@@ -534,6 +561,12 @@ class MegaDownloader:
                         if created_name:
                             parsed["display_name"] = created_name
                             discovered_display_name = True
+                    if (
+                        parsed.get("percent") not in {None, 0}
+                        or (parsed.get("bytes_done") or 0) > 0
+                        or (parsed.get("bytes_total") or 0) > 0
+                    ):
+                        real_progress_seen.set()
                     status = "downloading" if parsed else "probing"
                     progress_callback(status=status, message=line, **parsed)
                     if parsed:
@@ -546,6 +579,7 @@ class MegaDownloader:
             cleanup_paths_created_since(destination_dir, before_snapshot)
             raise
         finally:
+            auto_kick_stop.set()
             process_callback(None)
         if return_code != 0:
             raise DownloadError(f"{self.binary_name} exited with code {return_code}.")
@@ -559,6 +593,34 @@ class MegaDownloader:
             status="completed" if saw_progress else "probing",
             message="Download finished.",
         )
+
+    def _auto_restart_if_stalled(
+        self,
+        process: subprocess.Popen,
+        cancel_event: threading.Event,
+        pause_event: threading.Event,
+        real_progress_seen: threading.Event,
+        stop_event: threading.Event,
+    ) -> None:
+        if stop_event.wait(1.5):
+            return
+        if (
+            stop_event.is_set()
+            or cancel_event.is_set()
+            or pause_event.is_set()
+            or real_progress_seen.is_set()
+            or process.poll() is not None
+        ):
+            return
+
+        run_megacmd_transfers_command(self.binary_name, "-p")
+
+        if stop_event.wait(0.6):
+            return
+        if cancel_event.is_set() or pause_event.is_set() or process.poll() is not None:
+            return
+
+        run_megacmd_transfers_command(self.binary_name, "-r")
 
 
 class FakeDownloader:
@@ -867,38 +929,20 @@ class DownloadManager:
         destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
         ensure_destination_writable(destination_path)
         batch_id = uuid.uuid4().hex[:12]
-        prepared_jobs: list[dict] = []
-        for url in urls:
-            job_id = uuid.uuid4().hex
-            fallback_prefix = f"job-{job_id[:8]}"
-            try:
-                metadata = self.adapter.probe_metadata(url, fallback_prefix)
-            except DownloadError as exc:
-                raise ValueError(f"Could not resolve name and size for {url}: {exc}") from exc
-            prepared_jobs.append(
-                {
-                    "id": job_id,
-                    "url": url,
-                    "display_name": metadata.get("display_name") or infer_display_name(url, fallback_prefix),
-                    "bytes_total": metadata.get("bytes_total"),
-                }
-            )
         new_jobs: list[Job] = []
         with self._lock:
-            for prepared in prepared_jobs:
+            for url in urls:
+                job_id = uuid.uuid4().hex
                 job = Job(
-                    id=prepared["id"],
+                    id=job_id,
                     batch_id=batch_id,
-                    url=prepared["url"],
+                    url=url,
                     destination_key=destination_key,
                     destination_path=str(destination_path),
                     destination_relative_path=destination_relative_path,
-                    display_name=str(prepared["display_name"]),
+                    display_name=infer_display_name(url, f"job-{job_id[:8]}"),
                     destination_is_custom=destination_is_custom,
-                    transfer=TransferStatus(
-                        bytes_total=prepared["bytes_total"],
-                        started_at=None,
-                    ),
+                    transfer=TransferStatus(started_at=None),
                 )
                 self._jobs[job.id] = job
                 new_jobs.append(job)
@@ -1006,22 +1050,7 @@ class DownloadManager:
     def _run_mega_transfers_command(self, action_flag: str) -> None:
         if self.backend_name != "mega":
             return
-
-        transfers_binary = find_megacmd_companion_binary(self.megacmd_binary, "mega-transfers")
-        if not transfers_binary:
-            return
-
-        try:
-            subprocess.run(
-                [transfers_binary, action_flag, "-a", "--only-downloads"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        run_megacmd_transfers_command(self.megacmd_binary, action_flag)
 
     def _request_cancel_locked(self, job_id: str) -> Job:
         job = self._require_job(job_id)
