@@ -15,6 +15,8 @@ RUNTIME_HOME="/var/www"
 MEGA_KEYRING="/usr/share/keyrings/meganz-archive-keyring.gpg"
 MEGA_SOURCE_LIST="/etc/apt/sources.list.d/megacmd.list"
 DEFAULT_LISTEN_PORT="8090"
+RUNTIME_STATE_FILE_REL="data/jobs.json"
+RUNTIME_STATE_BACKUP=""
 
 log() {
   printf '[INFO] %s\n' "$*"
@@ -144,14 +146,53 @@ ensure_clean_checkout() {
   git -C "${APP_DIR}" diff --cached --quiet --ignore-submodules -- || die "Managed checkout has staged changes. Aborting update."
 }
 
+preserve_runtime_state_for_update() {
+  local runtime_state_file="${APP_DIR}/${RUNTIME_STATE_FILE_REL}"
+
+  if ! git -C "${APP_DIR}" ls-files --error-unmatch "${RUNTIME_STATE_FILE_REL}" >/dev/null 2>&1; then
+    return
+  fi
+
+  if git -C "${APP_DIR}" diff --quiet --ignore-submodules -- "${RUNTIME_STATE_FILE_REL}" \
+    && git -C "${APP_DIR}" diff --cached --quiet --ignore-submodules -- "${RUNTIME_STATE_FILE_REL}"; then
+    return
+  fi
+
+  if [[ -f "${runtime_state_file}" ]]; then
+    RUNTIME_STATE_BACKUP="$(mktemp)"
+    cp -f "${runtime_state_file}" "${RUNTIME_STATE_BACKUP}"
+    log "Temporarily backing up runtime job state before update."
+  fi
+
+  git -C "${APP_DIR}" reset --quiet HEAD -- "${RUNTIME_STATE_FILE_REL}" || true
+  git -C "${APP_DIR}" checkout -- "${RUNTIME_STATE_FILE_REL}" || true
+}
+
+restore_runtime_state_after_update() {
+  local runtime_state_file="${APP_DIR}/${RUNTIME_STATE_FILE_REL}"
+
+  if [[ -z "${RUNTIME_STATE_BACKUP}" || ! -f "${RUNTIME_STATE_BACKUP}" ]]; then
+    return
+  fi
+
+  install -d -m 0755 "$(dirname "${runtime_state_file}")"
+  cp -f "${RUNTIME_STATE_BACKUP}" "${runtime_state_file}"
+  chown "${RUNTIME_USER}:${RUNTIME_GROUP}" "${runtime_state_file}" || true
+  rm -f "${RUNTIME_STATE_BACKUP}"
+  RUNTIME_STATE_BACKUP=""
+  log "Restored runtime job state after update."
+}
+
 prepare_checkout() {
   if [[ -d "${APP_DIR}/.git" ]]; then
     log "Updating managed checkout in ${APP_DIR}."
     verify_repo_matches
+    preserve_runtime_state_for_update
     ensure_clean_checkout
     git -C "${APP_DIR}" fetch origin "${APP_BRANCH}"
     git -C "${APP_DIR}" checkout "${APP_BRANCH}"
     git -C "${APP_DIR}" pull --ff-only origin "${APP_BRANCH}"
+    restore_runtime_state_after_update
     return
   fi
 
@@ -315,6 +356,7 @@ PY
 main() {
   require_root
   require_systemd
+  trap restore_runtime_state_after_update EXIT
   detect_os
   log "Starting Flask Mega Downloader install/update on ${OS_FRIENDLY_NAME}."
   normalize_mega_apt_sources

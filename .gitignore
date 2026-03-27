@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+data/jobs.json
+downloads/
+tmp_service_probe/
