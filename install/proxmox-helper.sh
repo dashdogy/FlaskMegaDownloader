@@ -219,6 +219,8 @@ mega_env_cmd() {
 }
 
 prompt_mega_login() {
+  local reply mega_email mega_password mega_mfa
+
   if mega_env_cmd mega-whoami >/dev/null 2>&1; then
     log "MEGAcmd session already exists for ${RUNTIME_USER}."
     return
@@ -230,7 +232,6 @@ prompt_mega_login() {
     return
   fi
 
-  local reply
   read -r -p "Log in to MEGA now for ${RUNTIME_USER}? [Y/n]: " reply
   reply="${reply:-Y}"
   if [[ ! "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
@@ -238,14 +239,39 @@ prompt_mega_login() {
     return
   fi
 
-  if mega_env_cmd mega-login; then
+  read -r -p "MEGA email: " mega_email
+  if [[ -z "${mega_email}" ]]; then
+    warn "No MEGA email provided. Skipping login."
+    return
+  fi
+
+  read -r -s -p "MEGA password: " mega_password
+  printf '\n'
+  if [[ -z "${mega_password}" ]]; then
+    warn "No MEGA password provided. Skipping login."
+    return
+  fi
+
+  read -r -p "MEGA MFA code (optional, press Enter to skip): " mega_mfa
+
+  if [[ -n "${mega_mfa}" ]]; then
+    if mega_env_cmd mega-login "--auth-code=${mega_mfa}" "${mega_email}" "${mega_password}"; then
+      unset mega_password
+      if mega_env_cmd mega-whoami >/dev/null 2>&1; then
+        log "MEGAcmd login succeeded."
+        return
+      fi
+    fi
+  elif mega_env_cmd mega-login "${mega_email}" "${mega_password}"; then
+    unset mega_password
     if mega_env_cmd mega-whoami >/dev/null 2>&1; then
       log "MEGAcmd login succeeded."
       return
     fi
   fi
 
-  warn "MEGAcmd login did not complete successfully. You can retry later with: runuser -u ${RUNTIME_USER} -- env HOME=${RUNTIME_HOME} mega-login"
+  unset mega_password
+  warn "MEGAcmd login did not complete successfully. You can retry later with: runuser -u ${RUNTIME_USER} -- env HOME=${RUNTIME_HOME} mega-login your@email.example 'your-password'"
 }
 
 print_summary() {

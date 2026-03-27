@@ -7,8 +7,10 @@ Lightweight Flask UI for queueing public MEGA links to configured local folders,
 For an existing Debian or Ubuntu Proxmox LXC, run:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/dashdogy/FlaskMegaDownloader/master/install/proxmox-helper.sh)"
+bash -c "$(curl -H 'Cache-Control: no-cache' -fsSL https://raw.githubusercontent.com/dashdogy/FlaskMegaDownloader/master/install/proxmox-helper.sh)"
 ```
+
+If you have just pushed helper-script changes and want to avoid stale raw GitHub content, use the `Cache-Control: no-cache` header as shown above. If needed, you can also pin the raw URL to a specific commit SHA.
 
 The helper script is idempotent:
 
@@ -86,10 +88,16 @@ Useful environment variables:
 
 The Proxmox helper installs MEGAcmd and configures a persistent `HOME=/var/www` for the `www-data` service account so the MEGAcmd session survives restarts.
 
-If no session exists, the helper prompts for:
+If no session exists, the helper interactively prompts for:
+
+- MEGA email
+- MEGA password
+- optional MFA code
+
+Manual login later uses the MEGAcmd CLI form that requires explicit arguments:
 
 ```bash
-runuser -u www-data -- env HOME=/var/www mega-login
+runuser -u www-data -- env HOME=/var/www mega-login your@email.example 'your-password'
 ```
 
 To check the current login state later:
@@ -123,7 +131,7 @@ Useful recovery commands:
 ```bash
 systemctl status flask-mega-downloader
 runuser -u www-data -- env HOME=/var/www mega-whoami
-runuser -u www-data -- env HOME=/var/www mega-login
+runuser -u www-data -- env HOME=/var/www mega-login your@email.example 'your-password'
 ```
 
 ## Security Notes
