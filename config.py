@@ -9,7 +9,7 @@ MEDIA_DIR = Path(os.environ.get("MEGA_DOWNLOADER_MEDIA_DIR", DOWNLOADS_DIR / "me
 
 SECRET_KEY = os.environ.get("MEGA_DOWNLOADER_SECRET_KEY", "change-me")
 HOST = os.environ.get("MEGA_DOWNLOADER_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MEGA_DOWNLOADER_PORT", "8080"))
+PORT = int(os.environ.get("MEGA_DOWNLOADER_PORT", "8090"))
 POLL_INTERVAL_MS = int(os.environ.get("MEGA_DOWNLOADER_POLL_INTERVAL_MS", "1500"))
 
 JOB_STORAGE_FILE = DATA_DIR / "jobs.json"

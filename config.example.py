@@ -6,7 +6,7 @@ DATA_DIR = BASE_DIR / "data"
 
 SECRET_KEY = "replace-this-secret"
 HOST = "0.0.0.0"
-PORT = 8080
+PORT = 8090
 POLL_INTERVAL_MS = 1500
 
 JOB_STORAGE_FILE = DATA_DIR / "jobs.json"

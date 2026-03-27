@@ -61,7 +61,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The default app binds to `0.0.0.0:8080`.
+The default app binds to `0.0.0.0:8090`.
 
 The repo also includes [`install/proxmox-helper.sh`](/c:/Users/mkrbl/Documents/VSCODE/FlaskMegaDownloader/install/proxmox-helper.sh) for installing or updating the app inside an existing Proxmox LXC.
 

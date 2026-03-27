@@ -14,6 +14,7 @@ RUNTIME_GROUP="www-data"
 RUNTIME_HOME="/var/www"
 MEGA_KEYRING="/usr/share/keyrings/meganz-archive-keyring.gpg"
 MEGA_SOURCE_LIST="/etc/apt/sources.list.d/megacmd.list"
+DEFAULT_LISTEN_PORT="8090"
 
 log() {
   printf '[INFO] %s\n' "$*"
@@ -275,7 +276,7 @@ prompt_mega_login() {
 }
 
 print_summary() {
-  local app_host app_port lan_ip
+  local app_host app_port lan_ip service_listen
 
   readarray -t config_values < <(python3 - "${CONFIG_FILE}" <<'PY'
 from importlib.util import module_from_spec, spec_from_file_location
@@ -285,12 +286,18 @@ spec = spec_from_file_location("helper_config", sys.argv[1])
 module = module_from_spec(spec)
 spec.loader.exec_module(module)
 print(getattr(module, "HOST", "0.0.0.0"))
-print(getattr(module, "PORT", 8080))
+print(getattr(module, "PORT", 8090))
 PY
 )
 
   app_host="${config_values[0]:-0.0.0.0}"
-  app_port="${config_values[1]:-8080}"
+  app_port="${config_values[1]:-${DEFAULT_LISTEN_PORT}}"
+  if [[ -f "${SERVICE_DEST}" ]]; then
+    service_listen="$(grep -oE -- '--listen=[^ ]+' "${SERVICE_DEST}" | head -n 1 || true)"
+    if [[ -n "${service_listen}" ]]; then
+      app_port="${service_listen##*:}"
+    fi
+  fi
   lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   lan_ip="${lan_ip:-127.0.0.1}"
 
