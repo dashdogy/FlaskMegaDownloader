@@ -109,6 +109,21 @@ https://mega.nz/folder/..."></textarea>
         </div>
         <div class="section-actions">
             <p class="subtle">Polling every {{ poll_interval_ms }} ms</p>
+            <form action="{{ url_for('sort_jobs') }}" method="post" class="inline-form queue-sort-form">
+                <label for="queue_sort" class="sr-only">Sort queued jobs</label>
+                <select id="queue_sort" name="sort_by" class="compact-select">
+                    {% for option in queue_sort_options %}
+                        <option value="{{ option.value }}" {% if option.value == current_queue_sort %}selected{% endif %}>{{ option.label }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="secondary-button">Sort Queue</button>
+            </form>
+            <form action="{{ url_for('pause_all_jobs') }}" method="post" class="inline-form">
+                <button type="submit" class="secondary-button">Pause All</button>
+            </form>
+            <form action="{{ url_for('resume_all_jobs') }}" method="post" class="inline-form">
+                <button type="submit" class="secondary-button">Resume All</button>
+            </form>
             <form action="{{ url_for('clear_queue') }}" method="post" class="inline-form">
                 <button type="submit" class="danger-button">Clear Queue</button>
             </form>

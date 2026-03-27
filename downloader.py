@@ -827,6 +827,15 @@ class UnavailableDownloader:
 
 
 class DownloadManager:
+    QUEUE_SORT_LABELS = {
+        "oldest": "Oldest first",
+        "newest": "Newest first",
+        "name_asc": "Name A-Z",
+        "name_desc": "Name Z-A",
+        "size_asc": "Smallest first",
+        "size_desc": "Largest first",
+    }
+
     def __init__(
         self,
         storage: JsonStorage,
@@ -852,6 +861,7 @@ class DownloadManager:
         self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
+        self.queue_sort_mode = "oldest"
         self.backend_reason: str | None = None
         self.adapter = self._select_adapter()
         self._load_hidden_base_destinations()
@@ -887,9 +897,7 @@ class DownloadManager:
                     job.transfer.finished_at = None
                     job.transfer.paused = True
                 self._jobs[job.id] = job
-            for job in self._jobs.values():
-                if job.status == "queued":
-                    self._queue.put(job.id)
+            self._rebuild_queue_locked()
 
     def _load_favorites(self) -> None:
         loaded_favorites = self.storage.load_favorites()
@@ -938,6 +946,42 @@ class DownloadManager:
 
     def has_destinations(self) -> bool:
         return bool(self.destinations)
+
+    def queue_sort_options(self) -> list[dict[str, str]]:
+        return [
+            {"value": value, "label": label}
+            for value, label in self.QUEUE_SORT_LABELS.items()
+        ]
+
+    def _queued_job_ids_locked(self) -> list[str]:
+        with self._queue.mutex:
+            current_order = list(self._queue.queue)
+
+        ordered_ids: list[str] = []
+        seen: set[str] = set()
+        for job_id in current_order:
+            job = self._jobs.get(job_id)
+            if not job or job.status != "queued" or job_id in seen:
+                continue
+            ordered_ids.append(job_id)
+            seen.add(job_id)
+
+        for job in self._jobs.values():
+            if job.status == "queued" and job.id not in seen:
+                ordered_ids.append(job.id)
+                seen.add(job.id)
+
+        return ordered_ids
+
+    def _rebuild_queue_locked(self, ordered_job_ids: list[str] | None = None) -> None:
+        if ordered_job_ids is None:
+            ordered_job_ids = self._queued_job_ids_locked()
+
+        with self._queue.mutex:
+            self._queue.queue.clear()
+            self._queue.queue.extend(ordered_job_ids)
+            if ordered_job_ids:
+                self._queue.not_empty.notify_all()
 
     def can_restore_base_destinations(self) -> bool:
         return bool(self.hidden_base_destination_keys)
@@ -1029,7 +1073,7 @@ class DownloadManager:
                 )
                 self._jobs[job.id] = job
                 new_jobs.append(job)
-                self._queue.put(job.id)
+            self._rebuild_queue_locked()
             self._persist_locked(force=True)
         return new_jobs
 
@@ -1165,6 +1209,7 @@ class DownloadManager:
             if job.transfer.percent is None and job.transfer.bytes_total:
                 job.transfer.percent = clamp_percent((job.transfer.bytes_done / job.transfer.bytes_total) * 100.0)
             job.touch()
+            self._rebuild_queue_locked()
             self._persist_locked(force=True)
             return job
         if job.status not in ACTIVE_JOB_STATUSES:
@@ -1185,6 +1230,7 @@ class DownloadManager:
                 job.transfer.percent = infer_percent_from_messages(job.output_tail)
         job.append_output("Paused by user.")
         job.touch()
+        self._rebuild_queue_locked()
         self._persist_locked(force=True)
         return job
 
@@ -1205,13 +1251,14 @@ class DownloadManager:
             job.status = "downloading"
             job.append_output("Resuming download.")
             job.touch()
+            self._rebuild_queue_locked()
             self._persist_locked(force=True)
             return job
 
         job.status = "queued"
         job.append_output("Queued to resume.")
         job.touch()
-        self._queue.put(job.id)
+        self._rebuild_queue_locked()
         self._persist_locked(force=True)
         return job
 
@@ -1223,6 +1270,7 @@ class DownloadManager:
                 job.error = "Canceled before the download started."
                 job.transfer.finished_at = utcnow_iso()
                 job.touch()
+                self._rebuild_queue_locked()
                 self._persist_locked(force=True)
                 return job
             if job.status == "paused" and not self._has_live_runtime_locked(job_id):
@@ -1232,6 +1280,7 @@ class DownloadManager:
                 job.transfer.finished_at = utcnow_iso()
                 job.touch()
                 self._pause_events.pop(job_id, None)
+                self._rebuild_queue_locked()
                 self._persist_locked(force=True)
                 return job
 
@@ -1264,6 +1313,7 @@ class DownloadManager:
                 self._progress_samples.pop(job_id, None)
                 self._purge_on_finish.discard(job_id)
 
+            self._rebuild_queue_locked()
             self._persist_locked(force=True)
             return {"removed": removed, "canceling": canceling}
 
@@ -1281,13 +1331,91 @@ class DownloadManager:
             self._pause_events.pop(job_id, None)
             self._progress_samples.pop(job_id, None)
             self._purge_on_finish.discard(job_id)
-            self._queue.put(job.id)
+            self._rebuild_queue_locked()
             self._persist_locked(force=True)
             return job
 
+    def pause_all(self) -> dict[str, int]:
+        with self._lock:
+            paused = 0
+            for job in self._jobs.values():
+                if job.status == "queued" or job.status in ACTIVE_JOB_STATUSES:
+                    self._request_pause_locked(job.id)
+                    paused += 1
+            self._rebuild_queue_locked()
+            self._persist_locked(force=True)
+            return {"paused": paused}
+
+    def resume_all(self) -> dict[str, int]:
+        with self._lock:
+            resumed = 0
+            for job in self._jobs.values():
+                if job.status == "paused":
+                    self._request_resume_locked(job.id)
+                    resumed += 1
+            self._rebuild_queue_locked()
+            self._persist_locked(force=True)
+            return {"resumed": resumed}
+
+    def sort_queue(self, sort_by: str) -> dict[str, int | str]:
+        with self._lock:
+            if sort_by not in self.QUEUE_SORT_LABELS:
+                raise ValueError("Unknown queue sort mode.")
+
+            queued_jobs = [self._jobs[job_id] for job_id in self._queued_job_ids_locked() if job_id in self._jobs]
+            if not queued_jobs:
+                self.queue_sort_mode = sort_by
+                return {"sorted": 0, "sort_by": sort_by, "label": self.QUEUE_SORT_LABELS[sort_by]}
+
+            if sort_by == "oldest":
+                queued_jobs.sort(key=lambda job: (job.created_at, job.display_name.casefold(), job.id))
+            elif sort_by == "newest":
+                queued_jobs.sort(key=lambda job: (job.created_at, job.display_name.casefold(), job.id), reverse=True)
+            elif sort_by == "name_asc":
+                queued_jobs.sort(key=lambda job: (job.display_name.casefold(), job.created_at, job.id))
+            elif sort_by == "name_desc":
+                queued_jobs.sort(key=lambda job: (job.display_name.casefold(), job.created_at, job.id), reverse=True)
+            elif sort_by == "size_asc":
+                queued_jobs.sort(
+                    key=lambda job: (
+                        job.transfer.bytes_total is None,
+                        job.transfer.bytes_total or 0,
+                        job.display_name.casefold(),
+                        job.created_at,
+                        job.id,
+                    )
+                )
+            elif sort_by == "size_desc":
+                queued_jobs.sort(
+                    key=lambda job: (
+                        job.transfer.bytes_total is None,
+                        -(job.transfer.bytes_total or 0),
+                        job.display_name.casefold(),
+                        job.created_at,
+                        job.id,
+                    )
+                )
+
+            self.queue_sort_mode = sort_by
+            self._rebuild_queue_locked([job.id for job in queued_jobs])
+            self._persist_locked(force=True)
+            return {"sorted": len(queued_jobs), "sort_by": sort_by, "label": self.QUEUE_SORT_LABELS[sort_by]}
+
     def dashboard_payload(self) -> dict:
         with self._lock:
-            jobs = sorted(self._jobs.values(), key=lambda item: item.created_at, reverse=True)
+            queued_job_ids = self._queued_job_ids_locked()
+            queued_jobs = [self._jobs[job_id] for job_id in queued_job_ids if job_id in self._jobs]
+            active_jobs = sorted(
+                [job for job in self._jobs.values() if job.status in {"paused", *ACTIVE_JOB_STATUSES}],
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+            finished_jobs = sorted(
+                [job for job in self._jobs.values() if job.status not in {"queued", "paused", *ACTIVE_JOB_STATUSES}],
+                key=lambda item: item.updated_at,
+                reverse=True,
+            )
+            jobs = active_jobs + queued_jobs + finished_jobs
             destination_lookup = {item["key"]: item["label"] for item in self.destination_options()}
             job_dicts = [self._job_payload(job, destination_lookup) for job in jobs]
 
@@ -1369,6 +1497,7 @@ class DownloadManager:
             "summary": summary,
             "jobs": job_dicts,
             "batches": list(batches.values()),
+            "queue_sort": self.queue_sort_mode,
             "updated_at": utcnow_iso(),
         }
 

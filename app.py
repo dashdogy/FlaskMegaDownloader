@@ -95,6 +95,8 @@ def create_app() -> Flask:
             "destinations": manager.destination_options(),
             "has_destinations": manager.has_destinations(),
             "can_restore_base_destinations": manager.can_restore_base_destinations(),
+            "queue_sort_options": manager.queue_sort_options(),
+            "current_queue_sort": manager.queue_sort_mode,
         }
 
     @app.get("/")
@@ -210,6 +212,39 @@ def create_app() -> Flask:
         if not messages:
             messages.append("Queue was already empty.")
         flash(" ".join(messages), "success")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/jobs/pause-all")
+    def pause_all_jobs():
+        result = manager.pause_all()
+        if result["paused"]:
+            flash(f"Paused {result['paused']} queued or active job(s).", "success")
+        else:
+            flash("There were no queued or active jobs to pause.", "success")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/jobs/resume-all")
+    def resume_all_jobs():
+        result = manager.resume_all()
+        if result["resumed"]:
+            flash(f"Resumed {result['resumed']} paused job(s).", "success")
+        else:
+            flash("There were no paused jobs to resume.", "success")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/jobs/sort")
+    def sort_jobs():
+        sort_by = request.form.get("sort_by", "")
+        try:
+            result = manager.sort_queue(sort_by)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(request.referrer or url_for("dashboard"))
+
+        if result["sorted"]:
+            flash(f"Sorted {result['sorted']} queued job(s) by {result['label']}.", "success")
+        else:
+            flash("There were no queued jobs to sort.", "success")
         return redirect(request.referrer or url_for("dashboard"))
 
     @app.get("/explorer")
