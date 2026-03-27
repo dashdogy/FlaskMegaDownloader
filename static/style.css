@@ -202,6 +202,16 @@ button,
     align-items: end;
 }
 
+.destination-fields {
+    display: grid;
+    gap: 10px;
+}
+
+.form-hint {
+    margin: -2px 2px 0;
+    font-size: 0.88rem;
+}
+
 .destination-stack {
     display: grid;
     gap: 10px;

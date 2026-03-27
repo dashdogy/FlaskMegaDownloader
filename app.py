@@ -50,6 +50,15 @@ def parse_urls(raw_text: str) -> list[str]:
     return urls
 
 
+def normalize_destination_subpath(raw_text: str) -> str:
+    cleaned = (raw_text or "").strip().replace("\\", "/")
+    if not cleaned or cleaned == ".":
+        return ""
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(default_config)
@@ -94,12 +103,13 @@ def create_app() -> Flask:
     def submit():
         urls = parse_urls(request.form.get("urls", ""))
         destination_key = request.form.get("destination", "")
+        destination_subpath = normalize_destination_subpath(request.form.get("destination_path", ""))
         if not urls:
             flash("Paste at least one MEGA URL.", "error")
             return redirect(url_for("dashboard"))
 
         try:
-            jobs = manager.submit(urls, destination_key)
+            jobs = manager.submit(urls, destination_key, destination_subpath)
         except ValueError as exc:
             flash(str(exc), "error")
             return redirect(url_for("dashboard"))

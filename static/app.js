@@ -97,7 +97,7 @@
                     <button type="submit">Retry</button>
                 </form>
             ` : "",
-            `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.destination_key)}">Open Destination</a>`,
+            `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.destination_key)}&path=${encodeURIComponent(job.destination_relative_path || "")}">Open Destination</a>`,
         ].join("");
 
         return `
@@ -110,7 +110,7 @@
                     <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status_label)}</span>
                 </div>
                 <div class="metric-row">
-                    <span>${escapeHtml(job.destination_label)}</span>
+                    <span>${escapeHtml(job.destination_display)}</span>
                     <span>${escapeHtml(formatBytes(job.transfer.bytes_done))}</span>
                     <span>${escapeHtml(job.transfer.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>
                     <span>${escapeHtml(formatSpeed(job.transfer.speed_bps))}</span>

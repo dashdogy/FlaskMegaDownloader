@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pyzipper
 
-from explorer import normalize_destinations
+from explorer import normalize_destinations, path_within_root, relative_to_root
 from models import ACTIVE_JOB_STATUSES, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
@@ -355,10 +355,17 @@ class DownloadManager:
             raise ValueError(f"Unknown destination '{destination_key}'.")
         return self.destinations[destination_key]["path"]
 
-    def submit(self, urls: list[str], destination_key: str) -> list[Job]:
+    def resolve_destination(self, destination_key: str, destination_subpath: str = "") -> tuple[Path, str]:
+        root = self.get_destination_path(destination_key)
+        normalized_subpath = (destination_subpath or "").strip().replace("\\", "/")
+        resolved_path = path_within_root(root, normalized_subpath)
+        relative_path = relative_to_root(root, resolved_path)
+        return resolved_path, relative_path
+
+    def submit(self, urls: list[str], destination_key: str, destination_subpath: str = "") -> list[Job]:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
-        destination_path = self.get_destination_path(destination_key)
+        destination_path, destination_relative_path = self.resolve_destination(destination_key, destination_subpath)
         batch_id = uuid.uuid4().hex[:12]
         new_jobs: list[Job] = []
         with self._lock:
@@ -370,6 +377,7 @@ class DownloadManager:
                     url=url,
                     destination_key=destination_key,
                     destination_path=str(destination_path),
+                    destination_relative_path=destination_relative_path,
                     display_name=infer_display_name(url, f"job-{job_id[:8]}"),
                     transfer=TransferStatus(started_at=None),
                 )
@@ -499,6 +507,11 @@ class DownloadManager:
     def _job_payload(self, job: Job, destination_lookup: dict[str, str]) -> dict:
         payload = job.to_dict()
         payload["destination_label"] = destination_lookup.get(job.destination_key, job.destination_key)
+        payload["destination_display"] = (
+            f"{payload['destination_label']} / {job.destination_relative_path}"
+            if job.destination_relative_path
+            else payload["destination_label"]
+        )
         payload["can_cancel"] = job.status in {"queued", *ACTIVE_JOB_STATUSES}
         payload["can_retry"] = job.status in RETRYABLE_JOB_STATUSES
         payload["status_label"] = job.status.replace("_", " ").title()
@@ -521,7 +534,7 @@ class DownloadManager:
                 job.transfer.started_at = utcnow_iso()
                 job.transfer.finished_at = None
                 job.touch()
-                destination_dir = self.get_destination_path(job.destination_key)
+                destination_dir, _ = self.resolve_destination(job.destination_key, job.destination_relative_path)
                 destination_dir.mkdir(parents=True, exist_ok=True)
                 self._persist_locked(force=True)
 

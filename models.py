@@ -57,6 +57,7 @@ class Job:
     destination_key: str
     destination_path: str
     display_name: str
+    destination_relative_path: str = ""
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -88,6 +89,7 @@ class Job:
             url=data["url"],
             destination_key=data["destination_key"],
             destination_path=data["destination_path"],
+            destination_relative_path=data.get("destination_relative_path", ""),
             display_name=data.get("display_name") or data["url"],
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),

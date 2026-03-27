@@ -14,13 +14,22 @@
 https://mega.nz/folder/..."></textarea>
 
             <div class="form-row">
-                <div>
+                <div class="destination-fields">
                     <label for="destination">Destination</label>
                     <select id="destination" name="destination">
                         {% for destination in destinations %}
                             <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
                         {% endfor %}
                     </select>
+                    <label for="destination_path">Subfolder Path</label>
+                    <input
+                        id="destination_path"
+                        name="destination_path"
+                        type="text"
+                        placeholder="Optional subfolder, for example movies/new-arrivals"
+                        autocomplete="off"
+                    >
+                    <p class="subtle form-hint">Typed paths stay inside the selected destination root.</p>
                 </div>
                 <div class="button-row">
                     <button type="submit">Start Queue</button>
