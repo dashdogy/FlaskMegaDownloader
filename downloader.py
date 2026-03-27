@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import random
 import re
@@ -30,9 +31,17 @@ ProcessCallback = Callable[[subprocess.Popen | None], None]
 
 
 SIZE_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)(?:/s)?", re.IGNORECASE)
+SIZE_TOKEN_RE = re.compile(r"(?P<size>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)\b", re.IGNORECASE)
+SIZE_PAIR_RE = re.compile(
+    r"(?P<done>\d+(?:\.\d+)?)\s*(?P<done_unit>[KMGTP]?i?B)\s*(?:/|of)\s*"
+    r"(?P<total>\d+(?:\.\d+)?)\s*(?P<total_unit>[KMGTP]?i?B)\b",
+    re.IGNORECASE,
+)
+TOTAL_SIZE_RE = re.compile(r"\bof\s+(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)\b", re.IGNORECASE)
 PERCENT_RE = re.compile(r"(?P<percent>\d{1,3}(?:\.\d+)?)%")
 ETA_HMS_RE = re.compile(r"(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
 ETA_WORD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?)", re.IGNORECASE)
+SPEED_RE = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)/s\b", re.IGNORECASE)
 
 
 class DownloadError(Exception):
@@ -119,25 +128,77 @@ def infer_display_name(url: str, fallback_prefix: str) -> str:
     return f"{fallback_prefix}-{parsed.netloc or 'mega'}"
 
 
+def snapshot_relative_paths(root: Path) -> set[str]:
+    if not root.exists():
+        return set()
+
+    snapshot: set[str] = set()
+    for path in root.rglob("*"):
+        snapshot.add(relative_to_root(root, path))
+    return snapshot
+
+
+def cleanup_paths_created_since(root: Path, before_snapshot: set[str]) -> list[Path]:
+    if not root.exists():
+        return []
+
+    created_paths: list[Path] = []
+    for path in root.rglob("*"):
+        relative_path = relative_to_root(root, path)
+        if relative_path and relative_path not in before_snapshot:
+            created_paths.append(path)
+
+    removed_paths: list[Path] = []
+    for path in sorted(created_paths, key=lambda item: len(item.parts), reverse=True):
+        try:
+            if path.is_dir():
+                path.rmdir()
+            else:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+        removed_paths.append(path)
+    return removed_paths
+
+
 def parse_progress_line(line: str) -> dict:
     update: dict = {}
-    sizes = SIZE_RE.findall(line)
-    if sizes:
-        first = f"{sizes[0][0]} {sizes[0][1]}"
-        second = f"{sizes[1][0]} {sizes[1][1]}" if len(sizes) > 1 else None
-        if second:
-            update["bytes_done"] = parse_size_to_bytes(first)
-            update["bytes_total"] = parse_size_to_bytes(second)
-        else:
-            update["speed_bps"] = float(parse_size_to_bytes(first) or 0)
+    size_tokens: list[int] = []
+    speed_match = SPEED_RE.search(line)
+    if speed_match:
+        update["speed_bps"] = float(parse_size_to_bytes(speed_match.group(0)) or 0)
+
+    line_without_speed = SPEED_RE.sub("", line)
+
+    size_pair = SIZE_PAIR_RE.search(line_without_speed)
+    if size_pair:
+        update["bytes_done"] = parse_size_to_bytes(f"{size_pair.group('done')} {size_pair.group('done_unit')}")
+        update["bytes_total"] = parse_size_to_bytes(f"{size_pair.group('total')} {size_pair.group('total_unit')}")
+    else:
+        total_match = TOTAL_SIZE_RE.search(line_without_speed)
+        if total_match:
+            update["bytes_total"] = parse_size_to_bytes(f"{total_match.group('total')} {total_match.group('unit')}")
+
+        size_tokens = [
+            parse_size_to_bytes(f"{match.group('size')} {match.group('unit')}")
+            for match in SIZE_TOKEN_RE.finditer(line_without_speed)
+        ]
+        size_tokens = [value for value in size_tokens if value is not None]
+
+        if "bytes_total" not in update and len(size_tokens) >= 2:
+            update["bytes_done"] = size_tokens[0]
+            update["bytes_total"] = size_tokens[1]
+        elif "bytes_total" not in update and len(size_tokens) == 1 and "percent" not in update:
+            update["bytes_done"] = size_tokens[0]
 
     percent = PERCENT_RE.search(line)
     if percent:
         update["percent"] = float(percent.group("percent"))
-
-    speed_match = re.search(r"(?P<speed>\d+(?:\.\d+)?\s*[KMGTP]?i?B/s)", line, re.IGNORECASE)
-    if speed_match:
-        update["speed_bps"] = float(parse_size_to_bytes(speed_match.group("speed")) or 0)
+        if update.get("bytes_total") is not None and update.get("bytes_done") is None:
+            update["bytes_done"] = int(update["bytes_total"] * (update["percent"] / 100.0))
+        elif update.get("bytes_total") is None and len(size_tokens) == 1:
+            update["bytes_total"] = size_tokens[0]
+            update["bytes_done"] = int(update["bytes_total"] * (update["percent"] / 100.0))
 
     eta = parse_eta_seconds(line)
     if eta is not None:
@@ -183,6 +244,16 @@ class MegaDownloader:
     def available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
+    def _terminate_process(self, process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
     def download(
         self,
         job: Job,
@@ -196,6 +267,7 @@ class MegaDownloader:
             raise DownloadError(f"'{self.binary_name}' was not found in PATH.")
 
         before_names = {child.name for child in destination_dir.iterdir()}
+        before_snapshot = snapshot_relative_paths(destination_dir)
         command = [binary, job.url, str(destination_dir)]
         process = subprocess.Popen(
             command,
@@ -213,7 +285,7 @@ class MegaDownloader:
                 for raw_line in process.stdout:
                     line = raw_line.strip()
                     if cancel_event.is_set():
-                        process.terminate()
+                        self._terminate_process(process)
                         raise DownloadCanceled("Canceled by user.")
                     if not line:
                         continue
@@ -224,11 +296,13 @@ class MegaDownloader:
                         saw_progress = True
 
             return_code = process.wait()
+            if cancel_event.is_set():
+                raise DownloadCanceled("Canceled by user.")
+        except DownloadCanceled:
+            cleanup_paths_created_since(destination_dir, before_snapshot)
+            raise
         finally:
             process_callback(None)
-
-        if cancel_event.is_set():
-            raise DownloadCanceled("Canceled by user.")
         if return_code != 0:
             raise DownloadError(f"{self.binary_name} exited with code {return_code}.")
 
@@ -359,6 +433,7 @@ class DownloadManager:
         self._worker = threading.Thread(target=self._worker_loop, name="download-worker", daemon=True)
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
+        self._progress_samples: dict[str, tuple[float, int]] = {}
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
         self.backend_reason: str | None = None
@@ -567,6 +642,7 @@ class DownloadManager:
             job.transfer = TransferStatus()
             job.touch()
             self._cancel_events.pop(job_id, None)
+            self._progress_samples.pop(job_id, None)
             self._queue.put(job.id)
             self._persist_locked(force=True)
             return job
@@ -683,6 +759,7 @@ class DownloadManager:
                 if not job or job.status != "queued":
                     continue
                 cancel_event = self._cancel_events[job_id] = threading.Event()
+                self._progress_samples[job_id] = (time.monotonic(), 0)
                 job.status = "starting"
                 job.error = None
                 job.transfer.started_at = utcnow_iso()
@@ -713,6 +790,7 @@ class DownloadManager:
                 with self._lock:
                     self._cancel_events.pop(job_id, None)
                     self._active_processes.pop(job_id, None)
+                    self._progress_samples.pop(job_id, None)
 
     def _set_active_process(self, job_id: str, process: subprocess.Popen | None) -> None:
         with self._lock:
@@ -731,6 +809,9 @@ class DownloadManager:
                 job.display_name = kwargs["display_name"]
 
             transfer = job.transfer
+            speed_provided = "speed_bps" in kwargs and kwargs["speed_bps"] not in {None, 0}
+            eta_provided = "eta_seconds" in kwargs and kwargs["eta_seconds"] is not None
+            bytes_done_provided = "bytes_done" in kwargs and kwargs["bytes_done"] is not None
             if "bytes_done" in kwargs and kwargs["bytes_done"] is not None:
                 transfer.bytes_done = int(kwargs["bytes_done"])
             if "bytes_total" in kwargs and kwargs["bytes_total"] is not None:
@@ -743,11 +824,52 @@ class DownloadManager:
             if message:
                 job.append_output(message)
             percent = kwargs.get("percent")
-            if percent is not None and transfer.bytes_total and transfer.bytes_done == 0:
-                transfer.bytes_done = int(transfer.bytes_total * (percent / 100.0))
+            if percent is not None and transfer.bytes_total and not bytes_done_provided:
+                derived_bytes_done = int(transfer.bytes_total * (percent / 100.0))
+                transfer.bytes_done = max(transfer.bytes_done, derived_bytes_done)
+
+            self._derive_transfer_metrics(
+                job_id,
+                transfer,
+                speed_provided=speed_provided,
+                eta_provided=eta_provided,
+            )
 
             job.touch()
             self._persist_locked(force=False)
+
+    def _derive_transfer_metrics(
+        self,
+        job_id: str,
+        transfer: TransferStatus,
+        speed_provided: bool,
+        eta_provided: bool,
+    ) -> None:
+        now = time.monotonic()
+        current_bytes_done = transfer.bytes_done
+        sample = self._progress_samples.get(job_id)
+        derived_speed: float | None = None
+
+        if sample is None:
+            self._progress_samples[job_id] = (now, current_bytes_done)
+        else:
+            sample_time, sample_bytes = sample
+            if current_bytes_done != sample_bytes:
+                elapsed = now - sample_time
+                byte_delta = current_bytes_done - sample_bytes
+                if elapsed > 0 and byte_delta > 0:
+                    derived_speed = byte_delta / elapsed
+                self._progress_samples[job_id] = (now, current_bytes_done)
+
+        if not speed_provided and derived_speed is not None:
+            transfer.speed_bps = derived_speed
+
+        if transfer.bytes_total is not None:
+            if transfer.bytes_done >= transfer.bytes_total:
+                transfer.eta_seconds = 0
+            elif not eta_provided and transfer.speed_bps and transfer.speed_bps > 0:
+                remaining = max(transfer.bytes_total - transfer.bytes_done, 0)
+                transfer.eta_seconds = math.ceil(remaining / transfer.speed_bps) if remaining else 0
 
     def _finish_job(self, job_id: str, status: str, error: str | None) -> None:
         with self._lock:
