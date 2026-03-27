@@ -232,6 +232,12 @@ def parse_progress_line(line: str) -> dict:
     return update
 
 
+def clamp_percent(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    return max(0.0, min(100.0, float(value)))
+
+
 def looks_like_absolute_path(raw_path: str) -> bool:
     if not raw_path:
         return False
@@ -958,6 +964,8 @@ class DownloadManager:
                 transfer.bytes_done = int(kwargs["bytes_done"])
             if "bytes_total" in kwargs and kwargs["bytes_total"] is not None:
                 transfer.bytes_total = int(kwargs["bytes_total"])
+            if "percent" in kwargs and kwargs["percent"] is not None:
+                transfer.percent = clamp_percent(kwargs["percent"])
             if "speed_bps" in kwargs:
                 transfer.speed_bps = kwargs["speed_bps"]
             if "eta_seconds" in kwargs:
@@ -969,6 +977,8 @@ class DownloadManager:
             if percent is not None and transfer.bytes_total and not bytes_done_provided:
                 derived_bytes_done = int(transfer.bytes_total * (percent / 100.0))
                 transfer.bytes_done = max(transfer.bytes_done, derived_bytes_done)
+            elif transfer.bytes_total and transfer.bytes_total > 0:
+                transfer.percent = clamp_percent((transfer.bytes_done / transfer.bytes_total) * 100.0)
 
             self._derive_transfer_metrics(
                 job_id,
@@ -1034,6 +1044,8 @@ class DownloadManager:
             if status == "completed" and job.transfer.bytes_total is not None:
                 job.transfer.bytes_done = job.transfer.bytes_total
                 job.transfer.eta_seconds = 0
+            if status == "completed":
+                job.transfer.percent = 100.0
             job.transfer.speed_bps = None
             job.touch()
             self._persist_locked(force=True)

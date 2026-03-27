@@ -410,6 +410,24 @@ button:disabled {
     height: 100%;
     border-radius: 999px;
     background: linear-gradient(90deg, #8db5d3 0%, #4c7aa3 100%);
+    transition: width 220ms ease-out;
+}
+
+.progress-fill.active {
+    background:
+        linear-gradient(
+            115deg,
+            rgba(255, 255, 255, 0.18) 0%,
+            rgba(255, 255, 255, 0.18) 22%,
+            rgba(141, 181, 211, 0.92) 22%,
+            rgba(76, 122, 163, 0.98) 50%,
+            rgba(255, 255, 255, 0.18) 50%,
+            rgba(255, 255, 255, 0.18) 72%,
+            rgba(141, 181, 211, 0.92) 72%,
+            rgba(76, 122, 163, 0.98) 100%
+        );
+    background-size: 220px 100%;
+    animation: progress-flow 1.2s linear infinite;
 }
 
 .progress-fill.indeterminate {
@@ -432,6 +450,12 @@ button:disabled {
 
 .progress-fill.completed {
     background: linear-gradient(90deg, #7fc4a4 0%, #2c8460 100%);
+    animation: none;
+}
+
+@keyframes progress-flow {
+    0% { background-position: 220px 0; }
+    100% { background-position: 0 0; }
 }
 
 @keyframes pulse-slide {

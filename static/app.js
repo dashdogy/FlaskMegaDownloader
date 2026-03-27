@@ -53,16 +53,41 @@
         return `${seconds}s`;
     };
 
-    const progressPercent = (bytesDone, bytesTotal) => {
-        if (!bytesTotal) {
+    const clampPercent = (value) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) {
             return null;
         }
-        return Math.max(0, Math.min(100, (bytesDone / bytesTotal) * 100));
+        return Math.max(0, Math.min(100, Number(value)));
     };
 
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
+    const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
 
-    const buildProgressBar = (status, percent, hasUnknownTotal = false) => {
+    const progressPercent = (transfer) => {
+        if (transfer?.bytes_total) {
+            return clampPercent((transfer.bytes_done / transfer.bytes_total) * 100);
+        }
+        return clampPercent(transfer?.percent);
+    };
+
+    const batchProgressPercent = (batch) => {
+        if (batch.bytes_total && !batch.has_unknown_total) {
+            return clampPercent((batch.bytes_done / batch.bytes_total) * 100);
+        }
+        if (!Array.isArray(batch.jobs) || !batch.jobs.length) {
+            return null;
+        }
+        const percents = batch.jobs.map((job) => {
+            const percent = progressPercent(job.transfer);
+            if (percent !== null) {
+                return percent;
+            }
+            return job.status === "completed" ? 100 : 0;
+        });
+        return clampPercent(percents.reduce((sum, percent) => sum + percent, 0) / percents.length);
+    };
+
+    const buildProgressBar = (status, percent, indeterminate = false) => {
         let trackClass = "progress-track";
         let fillClass = "progress-fill";
 
@@ -79,8 +104,16 @@
             return `<div class="${trackClass}"><div class="${fillClass}" style="width:100%"></div></div>`;
         }
 
-        if (percent === null || hasUnknownTotal) {
+        if (status === "queued") {
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:0%"></div></div>`;
+        }
+
+        if (percent === null || indeterminate) {
             return `<div class="${trackClass}"><div class="${fillClass} indeterminate"></div></div>`;
+        }
+
+        if (isActiveStatus(status)) {
+            fillClass += " active";
         }
 
         return `<div class="${trackClass}"><div class="${fillClass}" style="width:${percent.toFixed(1)}%"></div></div>`;
@@ -121,8 +154,8 @@
     };
 
     const renderJob = (job) => {
-        const percent = progressPercent(job.transfer.bytes_done, job.transfer.bytes_total);
-        const progressBar = buildProgressBar(job.status, percent);
+        const percent = progressPercent(job.transfer);
+        const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
         const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
 
@@ -171,8 +204,9 @@
     };
 
     const renderBatch = (batch) => {
-        const percent = progressPercent(batch.bytes_done, batch.bytes_total);
-        const progressBar = buildProgressBar(batchVisualStatus(batch), percent, batch.has_unknown_total);
+        const visualStatus = batchVisualStatus(batch);
+        const percent = batchProgressPercent(batch);
+        const progressBar = buildProgressBar(visualStatus, percent, isActiveStatus(visualStatus) && percent === null);
         const statusSummary = Object.entries(batch.status_counts)
             .map(([status, count]) => `${status}: ${count}`)
             .join(" | ");

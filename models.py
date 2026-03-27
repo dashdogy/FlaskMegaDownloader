@@ -26,6 +26,7 @@ def utcnow_iso() -> str:
 class TransferStatus:
     bytes_done: int = 0
     bytes_total: int | None = None
+    percent: float | None = None
     speed_bps: float | None = None
     eta_seconds: int | None = None
     started_at: str | None = None
@@ -41,6 +42,7 @@ class TransferStatus:
         return cls(
             bytes_done=int(payload.get("bytes_done", 0) or 0),
             bytes_total=payload.get("bytes_total"),
+            percent=payload.get("percent"),
             speed_bps=payload.get("speed_bps"),
             eta_seconds=payload.get("eta_seconds"),
             started_at=payload.get("started_at"),
