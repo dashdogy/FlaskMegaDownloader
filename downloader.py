@@ -16,7 +16,7 @@ from pathlib import PureWindowsPath
 from queue import Empty, Queue
 import shlex
 from tempfile import NamedTemporaryFile
-from typing import Callable
+from typing import Callable, cast
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pyzipper
@@ -445,6 +445,8 @@ class DownloadManager:
         destinations: dict,
         megacmd_binary: str = "mega-get",
         backend: str = "auto",
+        max_concurrent_downloads: int = 1,
+        max_concurrent_downloads_limit: int = 8,
     ):
         self.storage = storage
         self.base_destinations = normalize_destinations(destinations)
@@ -453,10 +455,13 @@ class DownloadManager:
         self.destinations = dict(self.base_destinations)
         self.megacmd_binary = megacmd_binary
         self.backend_name = backend
+        self.max_concurrent_downloads_limit = max(1, int(max_concurrent_downloads_limit or 1))
+        self._max_concurrent_downloads = self._validate_concurrency(max_concurrent_downloads)
         self._lock = threading.RLock()
         self._queue: Queue[str] = Queue()
         self._stop_event = threading.Event()
-        self._worker = threading.Thread(target=self._worker_loop, name="download-worker", daemon=True)
+        self._workers: list[dict[str, threading.Thread | threading.Event]] = []
+        self._worker_name_counter = 0
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
@@ -467,8 +472,21 @@ class DownloadManager:
         self.adapter = self._select_adapter()
         self._load_hidden_base_destinations()
         self._load_favorites()
+        self._load_settings()
         self._load_jobs()
-        self._worker.start()
+        with self._lock:
+            self._sync_worker_count_locked()
+
+    def _validate_concurrency(self, value: int | str) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Simultaneous downloads must be a whole number.") from exc
+        if parsed < 1 or parsed > self.max_concurrent_downloads_limit:
+            raise ValueError(
+                f"Simultaneous downloads must be between 1 and {self.max_concurrent_downloads_limit}."
+            )
+        return parsed
 
     def _select_adapter(self):
         mega = MegaDownloader(self.megacmd_binary)
@@ -497,6 +515,18 @@ class DownloadManager:
             for job in self._jobs.values():
                 if job.status == "queued":
                     self._queue.put(job.id)
+
+    def _load_settings(self) -> None:
+        loaded_settings = self.storage.load_settings()
+        concurrency = loaded_settings.get("max_concurrent_downloads")
+        if concurrency is None:
+            return
+        try:
+            validated = self._validate_concurrency(concurrency)
+        except ValueError:
+            return
+        with self._lock:
+            self._max_concurrent_downloads = validated
 
     def _load_favorites(self) -> None:
         loaded_favorites = self.storage.load_favorites()
@@ -536,16 +566,83 @@ class DownloadManager:
             for item in self.favorite_destinations.values()
         ]
 
+    def _settings_payload(self) -> dict:
+        return {
+            "max_concurrent_downloads": self._max_concurrent_downloads,
+            "max_concurrent_downloads_limit": self.max_concurrent_downloads_limit,
+        }
+
+    def _prune_workers_locked(self) -> None:
+        self._workers = [
+            worker
+            for worker in self._workers
+            if cast(threading.Thread, worker["thread"]).is_alive()
+        ]
+
+    def _start_worker_locked(self) -> None:
+        stop_event = threading.Event()
+        worker_name = f"download-worker-{self._worker_name_counter}"
+        self._worker_name_counter += 1
+        thread = threading.Thread(
+            target=self._worker_loop,
+            args=(stop_event,),
+            name=worker_name,
+            daemon=True,
+        )
+        self._workers.append({"thread": thread, "stop_event": stop_event})
+        thread.start()
+
+    def _sync_worker_count_locked(self) -> None:
+        self._prune_workers_locked()
+        active_workers = len(self._workers)
+        if active_workers < self._max_concurrent_downloads:
+            for _ in range(self._max_concurrent_downloads - active_workers):
+                self._start_worker_locked()
+            return
+        if active_workers > self._max_concurrent_downloads:
+            for worker in self._workers[self._max_concurrent_downloads:]:
+                cast(threading.Event, worker["stop_event"]).set()
+
     def stop(self) -> None:
         self._stop_event.set()
         for cancel_event in self._cancel_events.values():
             cancel_event.set()
+        with self._lock:
+            for worker in self._workers:
+                cast(threading.Event, worker["stop_event"]).set()
+
+    def max_concurrent_downloads(self) -> int:
+        return self._max_concurrent_downloads
+
+    def update_max_concurrent_downloads(self, value: int | str) -> dict:
+        validated = self._validate_concurrency(value)
+        with self._lock:
+            previous = self._max_concurrent_downloads
+            self._max_concurrent_downloads = validated
+            self._sync_worker_count_locked()
+            self._persist_locked(force=True)
+            return {
+                "previous": previous,
+                "current": self._max_concurrent_downloads,
+                "scaling_up": validated > previous,
+                "scaling_down": validated < previous,
+            }
 
     def has_destinations(self) -> bool:
         return bool(self.destinations)
 
     def can_restore_base_destinations(self) -> bool:
         return bool(self.hidden_base_destination_keys)
+
+    def supports_precise_active_cancel(self) -> bool:
+        return not (self.backend_name == "mega" and self._max_concurrent_downloads > 1)
+
+    def settings_context(self) -> dict:
+        with self._lock:
+            settings = self._settings_payload()
+            settings["concurrency_choices"] = list(range(1, self.max_concurrent_downloads_limit + 1))
+            settings["active_downloads"] = sum(1 for job in self._jobs.values() if job.status in ACTIVE_JOB_STATUSES)
+            return settings
 
     def destination_options(self) -> list[dict]:
         options: list[dict] = []
@@ -749,6 +846,12 @@ class DownloadManager:
                 self._persist_locked(force=True)
                 return job
 
+            if job.status in ACTIVE_JOB_STATUSES and not self.supports_precise_active_cancel():
+                raise ValueError(
+                    "Individual cancel is unavailable while multiple MEGAcmd downloads are running. "
+                    "Use Clear Queue to stop all active downloads."
+                )
+
             return self._request_cancel_locked(job_id)
 
     def clear_queue(self) -> dict[str, int]:
@@ -867,6 +970,7 @@ class DownloadManager:
                 }.get(self.backend_name, self.backend_name),
                 "reason": self.backend_reason,
             },
+            "settings": self._settings_payload(),
             "summary": summary,
             "jobs": job_dicts,
             "batches": list(batches.values()),
@@ -884,55 +988,68 @@ class DownloadManager:
         explorer_root, explorer_path = self.build_explorer_target(job)
         payload["explorer_root"] = explorer_root
         payload["explorer_path"] = explorer_path
-        payload["can_cancel"] = job.status in {"queued", *ACTIVE_JOB_STATUSES}
+        payload["can_cancel"] = job.status == "queued" or (
+            job.status in ACTIVE_JOB_STATUSES and self.supports_precise_active_cancel()
+        )
         payload["can_retry"] = job.status in RETRYABLE_JOB_STATUSES
         payload["status_label"] = job.status.replace("_", " ").title()
         return payload
 
-    def _worker_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                job_id = self._queue.get(timeout=0.25)
-            except Empty:
-                continue
-
-            with self._lock:
-                job = self._jobs.get(job_id)
-                if not job or job.status != "queued":
+    def _worker_loop(self, worker_stop_event: threading.Event) -> None:
+        current_thread = threading.current_thread()
+        try:
+            while not self._stop_event.is_set() and not worker_stop_event.is_set():
+                try:
+                    job_id = self._queue.get(timeout=0.25)
+                except Empty:
                     continue
-                cancel_event = self._cancel_events[job_id] = threading.Event()
-                self._progress_samples[job_id] = (time.monotonic(), 0)
-                job.status = "starting"
-                job.error = None
-                job.transfer.started_at = utcnow_iso()
-                job.transfer.finished_at = None
-                job.touch()
-                destination_dir, _, _ = self.resolve_destination(
-                    job.destination_key,
-                    job.destination_path if job.destination_is_custom else job.destination_relative_path,
-                )
-                destination_dir.mkdir(parents=True, exist_ok=True)
-                self._persist_locked(force=True)
 
-            try:
-                self.adapter.download(
-                    job=job,
-                    destination_dir=destination_dir,
-                    progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
-                    cancel_event=cancel_event,
-                    process_callback=lambda process: self._set_active_process(job.id, process),
-                )
-            except DownloadCanceled as exc:
-                self._finish_job(job.id, status="canceled", error=str(exc))
-            except Exception as exc:
-                self._finish_job(job.id, status="failed", error=str(exc))
-            else:
-                self._finish_job(job.id, status="completed", error=None)
-            finally:
                 with self._lock:
-                    self._cancel_events.pop(job_id, None)
-                    self._active_processes.pop(job_id, None)
-                    self._progress_samples.pop(job_id, None)
+                    job = self._jobs.get(job_id)
+                    if not job or job.status != "queued":
+                        continue
+                    cancel_event = self._cancel_events[job_id] = threading.Event()
+                    self._progress_samples[job_id] = (time.monotonic(), 0)
+                    job.status = "starting"
+                    job.error = None
+                    job.transfer.started_at = utcnow_iso()
+                    job.transfer.finished_at = None
+                    job.touch()
+                    destination_dir, _, _ = self.resolve_destination(
+                        job.destination_key,
+                        job.destination_path if job.destination_is_custom else job.destination_relative_path,
+                    )
+                    destination_dir.mkdir(parents=True, exist_ok=True)
+                    self._persist_locked(force=True)
+
+                try:
+                    self.adapter.download(
+                        job=job,
+                        destination_dir=destination_dir,
+                        progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
+                        cancel_event=cancel_event,
+                        process_callback=lambda process: self._set_active_process(job.id, process),
+                    )
+                except DownloadCanceled as exc:
+                    self._finish_job(job.id, status="canceled", error=str(exc))
+                except Exception as exc:
+                    self._finish_job(job.id, status="failed", error=str(exc))
+                else:
+                    self._finish_job(job.id, status="completed", error=None)
+                finally:
+                    with self._lock:
+                        self._cancel_events.pop(job_id, None)
+                        self._active_processes.pop(job_id, None)
+                        self._progress_samples.pop(job_id, None)
+        finally:
+            with self._lock:
+                self._workers = [
+                    worker
+                    for worker in self._workers
+                    if worker["thread"] is not current_thread and cast(threading.Thread, worker["thread"]).is_alive()
+                ]
+                if not self._stop_event.is_set():
+                    self._sync_worker_count_locked()
 
     def _set_active_process(self, job_id: str, process: subprocess.Popen | None) -> None:
         with self._lock:
@@ -1046,6 +1163,7 @@ class DownloadManager:
             self._jobs.values(),
             self._favorite_models(),
             self.hidden_base_destination_keys,
+            self._settings_payload(),
         )
         self._last_persist = now
 

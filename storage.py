@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Iterable
 
 from models import FavoriteDestination, Job
@@ -32,21 +35,45 @@ class JsonStorage:
         raw = self._load_payload()
         return [str(item) for item in raw.get("hidden_base_destinations", [])]
 
+    def load_settings(self) -> dict:
+        raw = self._load_payload()
+        settings = raw.get("settings", {})
+        return settings if isinstance(settings, dict) else {}
+
     def save_state(
         self,
         jobs: Iterable[Job],
         favorites: Iterable[FavoriteDestination],
         hidden_base_destinations: Iterable[str],
+        settings: dict,
     ) -> None:
         payload = {
             "jobs": [job.to_dict() for job in jobs],
             "favorites": [favorite.to_dict() for favorite in favorites],
             "hidden_base_destinations": sorted({str(item) for item in hidden_base_destinations}),
+            "settings": settings,
         }
-        temp_path = self.path.with_suffix(".tmp")
         with self._lock:
-            temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            temp_path.replace(self.path)
+            with NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f"{self.path.stem}-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                handle.write(json.dumps(payload, indent=2))
+                temp_path = Path(handle.name)
+
+            for attempt in range(5):
+                try:
+                    os.replace(temp_path, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        temp_path.unlink(missing_ok=True)
+                        raise
+                    time.sleep(0.05)
 
     def save_jobs(self, jobs: Iterable[Job]) -> None:
-        self.save_state(jobs, [], [])
+        self.save_state(jobs, [], [], {})
