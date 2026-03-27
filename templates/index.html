@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="hero-grid">
+    <article class="card form-card">
+        <div class="section-copy">
+            <p class="eyebrow">Submit Batch</p>
+            <h2>Queue one or many MEGA links</h2>
+            <p>Paste one public URL per line. Blank lines are ignored and duplicates in the same submission are removed.</p>
+        </div>
+        <form action="{{ url_for('submit') }}" method="post" class="submit-form">
+            <label for="urls">MEGA URLs</label>
+            <textarea id="urls" name="urls" placeholder="https://mega.nz/file/...
+https://mega.nz/folder/..."></textarea>
+
+            <div class="form-row">
+                <div>
+                    <label for="destination">Destination</label>
+                    <select id="destination" name="destination">
+                        {% for destination in destinations %}
+                            <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="button-row">
+                    <button type="submit">Start Queue</button>
+                    <a class="ghost-button" href="{{ url_for('explorer') }}">Open Explorer</a>
+                </div>
+            </div>
+        </form>
+    </article>
+
+    <article class="card info-card">
+        <p class="eyebrow">Environment</p>
+        <h2>Configured destinations</h2>
+        <div class="destination-stack">
+            {% for destination in destinations %}
+                <a href="{{ url_for('explorer', root=destination.key) }}" class="destination-pill">
+                    <span>{{ destination.label }}</span>
+                    <small>{{ destination.path }}</small>
+                </a>
+            {% endfor %}
+        </div>
+        <div class="backend-callout">
+            <span>Downloader backend</span>
+            <strong id="backend-label">{{ dashboard.backend.label }}</strong>
+        </div>
+        <p class="subtle backend-note" id="backend-note">
+            {% if dashboard.backend.reason %}{{ dashboard.backend.reason }}{% endif %}
+        </p>
+    </article>
+</section>
+
+<section class="card section-card">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Live Summary</p>
+            <h2>Queue health</h2>
+        </div>
+        <p class="subtle" id="dashboard-updated">Updated {{ dashboard.updated_at }}</p>
+    </div>
+    <div id="summary-grid" class="stat-grid"></div>
+</section>
+
+<section class="card section-card">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Batches</p>
+            <h2>Queued jobs</h2>
+        </div>
+        <p class="subtle">Polling every {{ poll_interval_ms }} ms</p>
+    </div>
+    <div id="batch-list" class="batch-stack"></div>
+</section>
+
+<script id="initial-dashboard" type="application/json">{{ dashboard|tojson }}</script>
+{% endblock %}

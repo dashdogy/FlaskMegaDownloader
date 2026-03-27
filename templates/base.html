@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body data-poll-ms="{{ poll_interval_ms }}">
+    <div class="top-divider"></div>
+    <header class="site-shell site-header">
+        <div>
+            <p class="eyebrow">LAN Downloader</p>
+            <h1>{{ app_title }}</h1>
+            <p class="subtle">Soft-card dashboard for queued MEGA downloads and safe local extraction.</p>
+        </div>
+        <nav class="site-nav">
+            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
+            <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer'] %}active{% endif %}">Explorer</a>
+        </nav>
+    </header>
+
+    <main class="site-shell page-stack">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <section class="flash-stack">
+                    {% for category, message in messages %}
+                        <div class="flash flash-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                </section>
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</body>
+</html>

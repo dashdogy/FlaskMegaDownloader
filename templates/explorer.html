@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card section-card explorer-shell">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">File Explorer</p>
+            <h2>{{ explorer.root.label }}</h2>
+        </div>
+        <div class="sort-links">
+            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='name') }}" class="{% if explorer.sort == 'name' %}active{% endif %}">Name</a>
+            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='size') }}" class="{% if explorer.sort == 'size' %}active{% endif %}">Size</a>
+            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='modified') }}" class="{% if explorer.sort == 'modified' %}active{% endif %}">Modified</a>
+        </div>
+    </div>
+
+    <div class="root-tabs">
+        {% for destination in destinations %}
+            <a href="{{ url_for('explorer', root=destination.key) }}" class="{% if destination.key == explorer.root.key %}active{% endif %}">
+                {{ destination.label }}
+            </a>
+        {% endfor %}
+    </div>
+
+    <div class="breadcrumbs">
+        {% for crumb in explorer.breadcrumbs %}
+            <a href="{{ url_for('explorer', root=crumb.root, path=crumb.path, sort=explorer.sort) }}">{{ crumb.label }}</a>
+        {% endfor %}
+    </div>
+
+    <div class="explorer-meta">
+        <span>{{ explorer.current_label }}</span>
+        {% if explorer.current_path %}
+            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.parent_path, sort=explorer.sort) }}">Go Up</a>
+        {% endif %}
+    </div>
+
+    <div class="explorer-table-wrap">
+        <table class="explorer-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% if not explorer.entries %}
+                    <tr>
+                        <td colspan="4" class="empty-row">This folder is empty.</td>
+                    </tr>
+                {% endif %}
+                {% for entry in explorer.entries %}
+                    <tr>
+                        <td>
+                            <div class="entry-name">
+                                <span class="entry-icon">{{ "Folder" if entry.is_dir else "File" }}</span>
+                                <strong>{{ entry.name }}</strong>
+                            </div>
+                        </td>
+                        <td>{{ entry.size|filesize if not entry.is_dir else "-" }}</td>
+                        <td>{{ entry.modified_at|datetime_local }}</td>
+                        <td>
+                            <div class="entry-actions">
+                                {% if entry.is_dir %}
+                                    <a class="ghost-button" href="{{ url_for('explorer', root=explorer.root.key, path=entry.relative_path, sort=explorer.sort) }}">Open Folder</a>
+                                {% elif entry.is_zip %}
+                                    <form action="{{ url_for('unzip') }}" method="post" class="unzip-form">
+                                        <input type="hidden" name="root" value="{{ explorer.root.key }}">
+                                        <input type="hidden" name="archive_path" value="{{ entry.relative_path }}">
+                                        <input type="text" name="target_dir" placeholder="Extract folder">
+                                        <input type="password" name="password" placeholder="Password if needed">
+                                        <button type="submit">Unzip</button>
+                                    </form>
+                                {% else %}
+                                    <span class="subtle">No action</span>
+                                {% endif %}
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
