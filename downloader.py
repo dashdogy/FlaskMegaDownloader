@@ -42,6 +42,10 @@ PERCENT_RE = re.compile(r"(?P<percent>\d{1,3}(?:\.\d+)?)%")
 ETA_HMS_RE = re.compile(r"(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
 ETA_WORD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?)", re.IGNORECASE)
 SPEED_RE = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)/s\b", re.IGNORECASE)
+MEGACMD_LS_SUMMARY_RE = re.compile(
+    r"^(?P<flags>\S+)\s+(?P<versions>\d+)\s+(?P<size>\d+)\s+(?P<date>\S+)\s+(?P<name>.+)$"
+)
+MEGACMD_DU_RE = re.compile(r"^\s*(?P<size>\d+)(?:\s+(?P<path>.+?))?\s*$")
 
 
 class DownloadError(Exception):
@@ -128,6 +132,64 @@ def infer_display_name(url: str, fallback_prefix: str) -> str:
     if name:
         return name
     return f"{fallback_prefix}-{parsed.netloc or 'mega'}"
+
+
+def normalize_remote_display_name(raw_name: str | None) -> str | None:
+    if not raw_name:
+        return None
+    cleaned = raw_name.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.rstrip("/")
+    if not cleaned:
+        return None
+    path_name = PureWindowsPath(cleaned).name or PureWindowsPath(cleaned).parts[-1]
+    if "/" in cleaned:
+        posix_name = cleaned.split("/")[-1].strip()
+        if posix_name:
+            return posix_name
+    return path_name.strip() or cleaned
+
+
+def normalize_fake_display_name(url: str, fallback_prefix: str) -> str:
+    inferred_name = infer_display_name(url, fallback_prefix)
+    if inferred_name == "Resolving file name...":
+        return fallback_prefix
+    return inferred_name
+
+
+def parse_megacmd_ls_summary(output: str) -> list[dict]:
+    entries: list[dict] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("FLAGS"):
+            continue
+        match = MEGACMD_LS_SUMMARY_RE.match(line)
+        if not match:
+            continue
+        entries.append(
+            {
+                "flags": match.group("flags"),
+                "size": int(match.group("size")),
+                "name": match.group("name").strip(),
+            }
+        )
+    return entries
+
+
+def parse_megacmd_du_summary(output: str) -> tuple[int | None, str | None]:
+    size: int | None = None
+    path_name: str | None = None
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = MEGACMD_DU_RE.match(line)
+        if not match:
+            continue
+        size = int(match.group("size"))
+        path_name = normalize_remote_display_name(match.group("path"))
+    return size, path_name
 
 
 def infer_downloaded_display_name(root: Path, before_snapshot: set[str]) -> str | None:
@@ -308,6 +370,77 @@ class MegaDownloader:
     def available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
+    def _run_metadata_command(self, companion_name: str, args: list[str]) -> str:
+        binary = find_megacmd_companion_binary(self.binary_name, companion_name)
+        if not binary:
+            raise DownloadError(f"'{companion_name}' was not found in PATH.")
+
+        result = subprocess.run(
+            [binary, *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        output = (result.stdout or "").strip()
+        if result.returncode != 0:
+            raise DownloadError(output or f"{companion_name} exited with code {result.returncode}.")
+        return output
+
+    def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
+        display_name = infer_display_name(url, fallback_prefix)
+        bytes_total: int | None = None
+        ls_error: str | None = None
+        du_error: str | None = None
+
+        try:
+            ls_output = self._run_metadata_command(
+                "mega-ls",
+                ["-l", "--time-format=ISO6081_WITH_TIME", url],
+            )
+        except DownloadError as exc:
+            ls_error = str(exc)
+            ls_entries: list[dict] = []
+        else:
+            ls_entries = parse_megacmd_ls_summary(ls_output)
+
+        if ls_entries:
+            if len(ls_entries) == 1:
+                entry = ls_entries[0]
+                resolved_name = normalize_remote_display_name(entry["name"])
+                if resolved_name:
+                    display_name = resolved_name
+                if not str(entry["flags"]).startswith("d"):
+                    bytes_total = int(entry["size"])
+            else:
+                top_levels = {
+                    normalize_remote_display_name(str(entry["name"]).split("/", 1)[0])
+                    for entry in ls_entries
+                }
+                top_levels = {item for item in top_levels if item}
+                if len(top_levels) == 1:
+                    display_name = sorted(top_levels)[0]
+
+        try:
+            du_output = self._run_metadata_command("mega-du", [url])
+        except DownloadError as exc:
+            du_error = str(exc)
+        else:
+            du_size, du_name = parse_megacmd_du_summary(du_output)
+            if du_size is not None:
+                bytes_total = du_size
+            if du_name:
+                display_name = du_name
+
+        if bytes_total is None and ls_error and du_error:
+            raise DownloadError(f"Could not resolve metadata. ls: {ls_error} du: {du_error}")
+
+        return {
+            "display_name": display_name,
+            "bytes_total": bytes_total,
+        }
+
     def _terminate_process(self, process: subprocess.Popen) -> None:
         if process.poll() is not None:
             return
@@ -389,6 +522,18 @@ class MegaDownloader:
 
 
 class FakeDownloader:
+    def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
+        seed = int(hashlib.sha256(url.encode("utf-8")).hexdigest()[:8], 16)
+        rng = random.Random(seed)
+        total_bytes = rng.randint(12, 48) * 1024 * 1024
+        filename = normalize_fake_display_name(url, fallback_prefix)
+        if "." not in filename:
+            filename = f"{filename}.bin"
+        return {
+            "display_name": filename,
+            "bytes_total": total_bytes,
+        }
+
     def download(
         self,
         job: Job,
@@ -404,7 +549,7 @@ class FakeDownloader:
         seed = int(hashlib.sha256(job.url.encode("utf-8")).hexdigest()[:8], 16)
         rng = random.Random(seed)
         total_bytes = rng.randint(12, 48) * 1024 * 1024
-        filename = infer_display_name(job.url, f"download-{job.id[:8]}")
+        filename = normalize_fake_display_name(job.url, f"download-{job.id[:8]}")
         if "." not in filename:
             filename = f"{filename}.bin"
         password = query.get("pw", [None])[0]
@@ -508,6 +653,9 @@ class UnavailableDownloader:
         process_callback: ProcessCallback,
     ) -> None:
         process_callback(None)
+        raise DownloadError(self.reason)
+
+    def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
         raise DownloadError(self.reason)
 
 
@@ -679,20 +827,38 @@ class DownloadManager:
         destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
         ensure_destination_writable(destination_path)
         batch_id = uuid.uuid4().hex[:12]
+        prepared_jobs: list[dict] = []
+        for url in urls:
+            job_id = uuid.uuid4().hex
+            fallback_prefix = f"job-{job_id[:8]}"
+            try:
+                metadata = self.adapter.probe_metadata(url, fallback_prefix)
+            except DownloadError as exc:
+                raise ValueError(f"Could not resolve name and size for {url}: {exc}") from exc
+            prepared_jobs.append(
+                {
+                    "id": job_id,
+                    "url": url,
+                    "display_name": metadata.get("display_name") or infer_display_name(url, fallback_prefix),
+                    "bytes_total": metadata.get("bytes_total"),
+                }
+            )
         new_jobs: list[Job] = []
         with self._lock:
-            for url in urls:
-                job_id = uuid.uuid4().hex
+            for prepared in prepared_jobs:
                 job = Job(
-                    id=job_id,
+                    id=prepared["id"],
                     batch_id=batch_id,
-                    url=url,
+                    url=prepared["url"],
                     destination_key=destination_key,
                     destination_path=str(destination_path),
                     destination_relative_path=destination_relative_path,
-                    display_name=infer_display_name(url, f"job-{job_id[:8]}"),
+                    display_name=str(prepared["display_name"]),
                     destination_is_custom=destination_is_custom,
-                    transfer=TransferStatus(started_at=None),
+                    transfer=TransferStatus(
+                        bytes_total=prepared["bytes_total"],
+                        started_at=None,
+                    ),
                 )
                 self._jobs[job.id] = job
                 new_jobs.append(job)
