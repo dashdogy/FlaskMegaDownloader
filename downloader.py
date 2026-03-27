@@ -15,7 +15,7 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from queue import Empty, Queue
 import shlex
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import NamedTemporaryFile
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -156,12 +156,6 @@ def normalize_fake_display_name(url: str, fallback_prefix: str) -> str:
     if inferred_name == "Resolving file name...":
         return fallback_prefix
     return inferred_name
-
-
-def is_mega_folder_url(url: str) -> bool:
-    parsed = urlparse(url)
-    combined = f"{parsed.path}#{parsed.fragment}".lower()
-    return "/folder/" in combined or combined.startswith("#f!") or "/collection/" in combined
 
 
 def parse_megacmd_ls_summary(output: str) -> list[dict]:
@@ -453,50 +447,6 @@ class MegaDownloader:
             "bytes_total": resolved_bytes_total,
         }
 
-    def _probe_metadata_via_isolated_public_session(self, url: str, fallback_prefix: str) -> dict:
-        with TemporaryDirectory(prefix="mega-public-meta-") as temp_home:
-            env = dict(os.environ)
-            env["HOME"] = temp_home
-            ls_output = ""
-            du_output = ""
-            pwd_output = ""
-            logged_in = False
-            try:
-                self._run_metadata_command("mega-login", [url], env=env, timeout=30)
-                logged_in = True
-                ls_output = self._run_metadata_command(
-                    "mega-ls",
-                    ["-l", "--time-format=ISO6081_WITH_TIME", "/"],
-                    env=env,
-                    timeout=30,
-                )
-                du_output = self._run_metadata_command("mega-du", ["/"], env=env, timeout=30)
-                try:
-                    pwd_output = self._run_metadata_command("mega-pwd", [], env=env, timeout=10)
-                except DownloadError:
-                    pwd_output = ""
-            finally:
-                for companion_name in ("mega-logout",):
-                    if companion_name == "mega-logout" and not logged_in:
-                        continue
-                    try:
-                        self._run_metadata_command(companion_name, [], env=env, timeout=10)
-                    except DownloadError:
-                        pass
-
-        metadata = self._merge_metadata_from_outputs(
-            url,
-            fallback_prefix,
-            ls_output=ls_output,
-            du_output=du_output,
-        )
-        pwd_name = normalize_remote_display_name(pwd_output)
-        if pwd_name and is_mega_folder_url(url):
-            metadata["display_name"] = pwd_name
-        elif metadata["display_name"] == "Resolving file name..." and pwd_name:
-            metadata["display_name"] = pwd_name
-        return metadata
-
     def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
         ls_error: str | None = None
         du_error: str | None = None
@@ -525,17 +475,6 @@ class MegaDownloader:
             ls_output=ls_output if not ls_error else "",
             du_output=du_output,
         )
-
-        if is_mega_folder_url(url):
-            try:
-                isolated_metadata = self._probe_metadata_via_isolated_public_session(url, fallback_prefix)
-            except DownloadError:
-                isolated_metadata = {}
-            else:
-                if isolated_metadata.get("display_name"):
-                    metadata["display_name"] = isolated_metadata["display_name"]
-                if isolated_metadata.get("bytes_total") is not None:
-                    metadata["bytes_total"] = isolated_metadata["bytes_total"]
 
         if metadata["bytes_total"] is None and ls_error and du_error:
             raise DownloadError(f"Could not resolve metadata. ls: {ls_error} du: {du_error}")
