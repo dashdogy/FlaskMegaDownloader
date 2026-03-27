@@ -104,6 +104,41 @@
         "Simulating download progress.",
         "Fake download finished."
       ]
+    },
+    {
+      "id": "7a64b0a7b13a4a9cae1c797de9034c81",
+      "batch_id": "56f1354c6f7b",
+      "url": "https://mega.nz/file/vUs31KxB#eLNDCVyiBHNpKwFzZi0fXF3EEtkqmfdmHNKysnHtjrw",
+      "destination_key": "downloads",
+      "destination_path": "C:\\Users\\mkrbl\\Documents\\VSCODE\\FlaskMegaDownloader\\downloads",
+      "display_name": "vUs31KxB.bin",
+      "status": "completed",
+      "created_at": "2026-03-27T13:03:13.945736+00:00",
+      "updated_at": "2026-03-27T13:03:19.446855+00:00",
+      "error": null,
+      "transfer": {
+        "bytes_done": 49283072,
+        "bytes_total": 49283072,
+        "speed_bps": null,
+        "eta_seconds": 0,
+        "started_at": "2026-03-27T13:03:13.947285+00:00",
+        "finished_at": "2026-03-27T13:03:19.446855+00:00",
+        "last_message": "Fake download finished."
+      },
+      "output_tail": [
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Simulating download progress.",
+        "Fake download finished."
+      ]
     }
   ]
 }

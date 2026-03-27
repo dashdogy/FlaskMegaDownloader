@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/flask-mega-downloader
 Environment=MEGA_DOWNLOADER_CONFIG=/etc/flask-mega-downloader/config.py
+Environment=HOME=/var/www
 ExecStart=/opt/flask-mega-downloader/.venv/bin/waitress-serve --listen=0.0.0.0:8080 --call app:create_app
 Restart=on-failure
 RestartSec=5
