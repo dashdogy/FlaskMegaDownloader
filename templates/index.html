@@ -21,7 +21,7 @@ https://mega.nz/folder/..."></textarea>
                             <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
                         {% endfor %}
                     </select>
-                    <label for="destination_path">Subfolder Path</label>
+                    <label for="destination_path">Destination Path</label>
                     <input
                         id="destination_path"
                         name="destination_path"
@@ -29,10 +29,13 @@ https://mega.nz/folder/..."></textarea>
                         placeholder="Optional subfolder or full path, for example movies/new-arrivals or /mnt/disk2/downloads"
                         autocomplete="off"
                     >
-                    <p class="subtle form-hint">Relative paths stay inside the selected root. Absolute paths override the dropdown and can target another mounted disk.</p>
+                    <p class="subtle form-hint">Use a relative path for a subfolder inside the selected root, or an absolute path for another mounted disk. Add a custom path to favorites only after it is writable by the app user.</p>
                 </div>
                 <div class="button-row">
                     <button type="submit">Start Queue</button>
+                    <button type="submit" formaction="{{ url_for('add_favorite') }}" formmethod="post" class="secondary-button">
+                        Add To Favorites
+                    </button>
                     <a class="ghost-button" href="{{ url_for('explorer') }}">Open Explorer</a>
                 </div>
             </div>
@@ -45,7 +48,7 @@ https://mega.nz/folder/..."></textarea>
         <div class="destination-stack">
             {% for destination in destinations %}
                 <a href="{{ url_for('explorer', root=destination.key) }}" class="destination-pill">
-                    <span>{{ destination.label }}</span>
+                    <span>{{ destination.label }}{% if destination.favorite %} (Favorite){% endif %}</span>
                     <small>{{ destination.path }}</small>
                 </a>
             {% endfor %}

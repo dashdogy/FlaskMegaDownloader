@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import re
 import shutil
@@ -12,13 +13,15 @@ import zipfile
 from pathlib import Path
 from pathlib import PureWindowsPath
 from queue import Empty, Queue
+import shlex
+from tempfile import NamedTemporaryFile
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pyzipper
 
 from explorer import normalize_destinations, path_within_root, relative_to_root
-from models import ACTIVE_JOB_STATUSES, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
+from models import ACTIVE_JOB_STATUSES, FavoriteDestination, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
 
@@ -38,6 +41,29 @@ class DownloadError(Exception):
 
 class DownloadCanceled(Exception):
     pass
+
+
+def current_runtime_user_label() -> str:
+    if os.name == "posix":
+        try:
+            import pwd
+
+            return pwd.getpwuid(os.geteuid()).pw_name
+        except (ImportError, KeyError):
+            pass
+    return os.environ.get("USERNAME") or os.environ.get("USER") or "the app service user"
+
+
+def permission_fix_hint(destination_path: Path) -> str:
+    runtime_user = current_runtime_user_label()
+    quoted_path = shlex.quote(str(destination_path))
+    return (
+        f"Permission denied for destination '{destination_path}'. "
+        f"'{runtime_user}' needs write access to that path. "
+        f"Fix it with 'sudo mkdir -p {quoted_path}' and either "
+        f"'sudo chown -R {runtime_user}:{runtime_user} {quoted_path}' or "
+        f"'sudo setfacl -R -m u:{runtime_user}:rwx {quoted_path}'."
+    )
 
 
 def parse_size_to_bytes(value: str | None) -> int | None:
@@ -124,7 +150,30 @@ def looks_like_absolute_path(raw_path: str) -> bool:
     if not raw_path:
         return False
     path = raw_path.strip()
-    return Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
+    return path.startswith(("/", "\\")) or Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def ensure_destination_writable(destination_path: Path) -> None:
+    try:
+        destination_path.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise ValueError(permission_fix_hint(destination_path)) from exc
+
+    if not destination_path.is_dir():
+        raise ValueError(f"Destination '{destination_path}' exists but is not a directory.")
+
+    probe_path: str | None = None
+    try:
+        with NamedTemporaryFile(dir=destination_path, prefix=".write-test-", delete=False) as handle:
+            probe_path = handle.name
+    except PermissionError as exc:
+        raise ValueError(permission_fix_hint(destination_path)) from exc
+    finally:
+        if probe_path:
+            try:
+                Path(probe_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 class MegaDownloader:
@@ -299,7 +348,9 @@ class DownloadManager:
         backend: str = "auto",
     ):
         self.storage = storage
-        self.destinations = normalize_destinations(destinations)
+        self.base_destinations = normalize_destinations(destinations)
+        self.favorite_destinations: dict[str, dict] = {}
+        self.destinations = dict(self.base_destinations)
         self.megacmd_binary = megacmd_binary
         self.backend_name = backend
         self._lock = threading.RLock()
@@ -312,6 +363,7 @@ class DownloadManager:
         self._jobs: dict[str, Job] = {}
         self.backend_reason: str | None = None
         self.adapter = self._select_adapter()
+        self._load_favorites()
         self._load_jobs()
         self._worker.start()
 
@@ -343,20 +395,59 @@ class DownloadManager:
                 if job.status == "queued":
                     self._queue.put(job.id)
 
+    def _load_favorites(self) -> None:
+        loaded_favorites = self.storage.load_favorites()
+        with self._lock:
+            for favorite in loaded_favorites:
+                resolved = Path(favorite.path).expanduser().resolve()
+                self.favorite_destinations[favorite.key] = {
+                    "key": favorite.key,
+                    "label": favorite.label,
+                    "path": resolved,
+                    "favorite": True,
+                }
+            self._refresh_destinations()
+
+    def _refresh_destinations(self) -> None:
+        self.destinations = {**self.base_destinations, **self.favorite_destinations}
+
+    def _favorite_models(self) -> list[FavoriteDestination]:
+        return [
+            FavoriteDestination(
+                key=item["key"],
+                label=item["label"],
+                path=str(item["path"]),
+                favorite=True,
+            )
+            for item in self.favorite_destinations.values()
+        ]
+
     def stop(self) -> None:
         self._stop_event.set()
         for cancel_event in self._cancel_events.values():
             cancel_event.set()
 
     def destination_options(self) -> list[dict]:
-        return [
-            {
-                "key": item["key"],
-                "label": item["label"],
-                "path": str(item["path"]),
-            }
-            for item in self.destinations.values()
-        ]
+        options: list[dict] = []
+        for item in self.base_destinations.values():
+            options.append(
+                {
+                    "key": item["key"],
+                    "label": item["label"],
+                    "path": str(item["path"]),
+                    "favorite": False,
+                }
+            )
+        for item in self.favorite_destinations.values():
+            options.append(
+                {
+                    "key": item["key"],
+                    "label": item["label"],
+                    "path": str(item["path"]),
+                    "favorite": True,
+                }
+            )
+        return options
 
     def get_destination_path(self, destination_key: str) -> Path:
         if destination_key not in self.destinations:
@@ -379,6 +470,7 @@ class DownloadManager:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
         destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
+        ensure_destination_writable(destination_path)
         batch_id = uuid.uuid4().hex[:12]
         new_jobs: list[Job] = []
         with self._lock:
@@ -400,6 +492,40 @@ class DownloadManager:
                 self._queue.put(job.id)
             self._persist_locked(force=True)
         return new_jobs
+
+    def add_favorite_destination(self, destination_key: str, destination_input: str) -> dict:
+        destination_path, _, _ = self.resolve_destination(destination_key, destination_input)
+        ensure_destination_writable(destination_path)
+
+        with self._lock:
+            for item in self.destinations.values():
+                if item["path"] == destination_path:
+                    return {
+                        "key": item["key"],
+                        "label": item["label"],
+                        "path": str(item["path"]),
+                        "favorite": bool(item.get("favorite", False)),
+                        "created": False,
+                    }
+
+            label = destination_path.name or str(destination_path)
+            key = f"favorite_{hashlib.sha1(str(destination_path).encode('utf-8')).hexdigest()[:10]}"
+            favorite = {
+                "key": key,
+                "label": label,
+                "path": destination_path,
+                "favorite": True,
+            }
+            self.favorite_destinations[key] = favorite
+            self._refresh_destinations()
+            self._persist_locked(force=True)
+            return {
+                "key": key,
+                "label": label,
+                "path": str(destination_path),
+                "favorite": True,
+                "created": True,
+            }
 
     def build_explorer_target(self, job: Job) -> tuple[str | None, str]:
         if not job.destination_is_custom:
@@ -640,7 +766,7 @@ class DownloadManager:
         now = time.monotonic()
         if not force and now - self._last_persist < 0.5:
             return
-        self.storage.save_jobs(self._jobs.values())
+        self.storage.save_state(self._jobs.values(), self._favorite_models())
         self._last_persist = now
 
     def _require_job(self, job_id: str) -> Job:

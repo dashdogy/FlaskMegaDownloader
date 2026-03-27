@@ -117,6 +117,26 @@ def create_app() -> Flask:
         flash(f"Queued {len(jobs)} job(s) in batch {jobs[0].batch_id}.", "success")
         return redirect(url_for("dashboard"))
 
+    @app.post("/favorites")
+    def add_favorite():
+        destination_key = request.form.get("destination", "")
+        destination_input = normalize_destination_path_input(request.form.get("destination_path", ""))
+        if not destination_input:
+            flash("Enter a custom destination path before adding it to favorites.", "error")
+            return redirect(url_for("dashboard"))
+
+        try:
+            favorite = manager.add_favorite_destination(destination_key, destination_input)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("dashboard"))
+
+        if favorite["created"]:
+            flash(f"Added favorite destination: {favorite['path']}", "success")
+        else:
+            flash(f"Destination already exists in the dropdown: {favorite['path']}", "success")
+        return redirect(url_for("dashboard"))
+
     @app.get("/api/jobs")
     def api_jobs():
         return jsonify(manager.dashboard_payload())

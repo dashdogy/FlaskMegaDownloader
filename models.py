@@ -113,3 +113,23 @@ class ExplorerEntry:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class FavoriteDestination:
+    key: str
+    label: str
+    path: str
+    favorite: bool = True
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FavoriteDestination":
+        return cls(
+            key=data["key"],
+            label=data["label"],
+            path=data["path"],
+            favorite=bool(data.get("favorite", True)),
+        )

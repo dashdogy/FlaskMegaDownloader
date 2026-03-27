@@ -35,6 +35,7 @@ Supported LXC guest OS versions:
 - Safe file explorer rooted inside configured destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
 - Cancel and retry job actions
+- Custom destination paths, including a saved favorites list for paths you reuse
 
 ## Project Layout
 
@@ -83,6 +84,8 @@ Useful environment variables:
 - `MEGACMD_BINARY`: override the `mega-get` executable name/path
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
+
+Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
 
 ## Real MEGA Integration
 
