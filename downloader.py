@@ -1357,6 +1357,20 @@ class DownloadManager:
             self._persist_locked(force=True)
             return {"resumed": resumed}
 
+    def bulk_pause_toggle(self) -> dict[str, str | bool]:
+        with self._lock:
+            has_pauseable = any(
+                job.status == "queued" or job.status in ACTIVE_JOB_STATUSES
+                for job in self._jobs.values()
+            )
+            has_paused = any(job.status == "paused" for job in self._jobs.values())
+
+        if has_pauseable:
+            return {"action": "pause", "label": "Pause All", "available": True}
+        if has_paused:
+            return {"action": "resume", "label": "Resume All", "available": True}
+        return {"action": "pause", "label": "Pause All", "available": False}
+
     def sort_queue(self, sort_by: str) -> dict[str, int | str]:
         with self._lock:
             if sort_by not in self.QUEUE_SORT_LABELS:
@@ -1498,6 +1512,7 @@ class DownloadManager:
             "jobs": job_dicts,
             "batches": list(batches.values()),
             "queue_sort": self.queue_sort_mode,
+            "bulk_pause_toggle": self.bulk_pause_toggle(),
             "updated_at": utcnow_iso(),
         }
 

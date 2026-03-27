@@ -214,22 +214,19 @@ def create_app() -> Flask:
         flash(" ".join(messages), "success")
         return redirect(request.referrer or url_for("dashboard"))
 
-    @app.post("/jobs/pause-all")
-    def pause_all_jobs():
-        result = manager.pause_all()
-        if result["paused"]:
+    @app.post("/jobs/toggle-all")
+    def toggle_all_jobs():
+        toggle = manager.bulk_pause_toggle()
+        if not toggle["available"]:
+            flash("There were no queued, active, or paused jobs to change.", "success")
+            return redirect(request.referrer or url_for("dashboard"))
+
+        if toggle["action"] == "pause":
+            result = manager.pause_all()
             flash(f"Paused {result['paused']} queued or active job(s).", "success")
         else:
-            flash("There were no queued or active jobs to pause.", "success")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    @app.post("/jobs/resume-all")
-    def resume_all_jobs():
-        result = manager.resume_all()
-        if result["resumed"]:
+            result = manager.resume_all()
             flash(f"Resumed {result['resumed']} paused job(s).", "success")
-        else:
-            flash("There were no paused jobs to resume.", "success")
         return redirect(request.referrer or url_for("dashboard"))
 
     @app.post("/jobs/sort")

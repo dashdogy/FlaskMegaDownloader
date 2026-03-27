@@ -118,11 +118,15 @@ https://mega.nz/folder/..."></textarea>
                 </select>
                 <button type="submit" class="secondary-button">Sort Queue</button>
             </form>
-            <form action="{{ url_for('pause_all_jobs') }}" method="post" class="inline-form">
-                <button type="submit" class="secondary-button">Pause All</button>
-            </form>
-            <form action="{{ url_for('resume_all_jobs') }}" method="post" class="inline-form">
-                <button type="submit" class="secondary-button">Resume All</button>
+            <form action="{{ url_for('toggle_all_jobs') }}" method="post" class="inline-form">
+                <button
+                    id="bulk-pause-toggle"
+                    type="submit"
+                    class="secondary-button"
+                    {% if not dashboard.bulk_pause_toggle.available %}disabled{% endif %}
+                >
+                    {{ dashboard.bulk_pause_toggle.label }}
+                </button>
             </form>
             <form action="{{ url_for('clear_queue') }}" method="post" class="inline-form">
                 <button type="submit" class="danger-button">Clear Queue</button>
