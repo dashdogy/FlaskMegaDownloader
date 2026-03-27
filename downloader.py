@@ -460,8 +460,10 @@ class MegaDownloader:
             ls_output = ""
             du_output = ""
             pwd_output = ""
+            logged_in = False
             try:
                 self._run_metadata_command("mega-login", [url], env=env, timeout=30)
+                logged_in = True
                 ls_output = self._run_metadata_command(
                     "mega-ls",
                     ["-l", "--time-format=ISO6081_WITH_TIME", "/"],
@@ -474,7 +476,9 @@ class MegaDownloader:
                 except DownloadError:
                     pwd_output = ""
             finally:
-                for companion_name in ("mega-logout", "mega-quit"):
+                for companion_name in ("mega-logout",):
+                    if companion_name == "mega-logout" and not logged_in:
+                        continue
                     try:
                         self._run_metadata_command(companion_name, [], env=env, timeout=10)
                     except DownloadError:
