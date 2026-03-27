@@ -290,45 +290,6 @@ button:disabled {
     align-items: center;
 }
 
-.settings-panel {
-    margin-top: 18px;
-    padding: 18px;
-    border-radius: 20px;
-    background: rgba(240, 246, 251, 0.92);
-    border: 1px solid rgba(67, 115, 157, 0.08);
-}
-
-.settings-copy h3 {
-    margin: 0 0 6px;
-    font-size: 1.05rem;
-}
-
-.settings-copy p {
-    margin: 0;
-}
-
-.settings-form {
-    display: grid;
-    gap: 10px;
-    margin-top: 14px;
-}
-
-.settings-controls {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    flex-wrap: wrap;
-}
-
-.settings-controls select {
-    min-width: 170px;
-    max-width: 220px;
-}
-
-.settings-note {
-    margin: 0;
-}
-
 .backend-note {
     margin: 10px 2px 0;
 }

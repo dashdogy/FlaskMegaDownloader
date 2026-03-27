@@ -83,8 +83,6 @@ def create_app() -> Flask:
         destinations=app.config["ALLOWED_DESTINATIONS"],
         megacmd_binary=app.config["MEGACMD_BINARY"],
         backend=app.config["DOWNLOADER_BACKEND"],
-        max_concurrent_downloads=app.config["MAX_CONCURRENT_DOWNLOADS"],
-        max_concurrent_downloads_limit=app.config["MAX_CONCURRENT_DOWNLOADS_LIMIT"],
     )
     app.extensions["download_manager"] = manager
     atexit.register(manager.stop)
@@ -97,7 +95,6 @@ def create_app() -> Flask:
             "destinations": manager.destination_options(),
             "has_destinations": manager.has_destinations(),
             "can_restore_base_destinations": manager.can_restore_base_destinations(),
-            "download_settings": manager.settings_context(),
         }
 
     @app.get("/")
@@ -158,29 +155,6 @@ def create_app() -> Flask:
             flash(f"Restored {restored} configured destination(s).", "success")
         else:
             flash("There were no hidden configured destinations to restore.", "success")
-        return redirect(request.referrer or url_for("dashboard"))
-
-    @app.post("/settings/concurrency")
-    def update_concurrency():
-        try:
-            result = manager.update_max_concurrent_downloads(request.form.get("max_concurrent_downloads", "1"))
-        except ValueError as exc:
-            flash(str(exc), "error")
-            return redirect(request.referrer or url_for("dashboard"))
-
-        if result["scaling_up"]:
-            flash(
-                f"Simultaneous downloads increased from {result['previous']} to {result['current']}.",
-                "success",
-            )
-        elif result["scaling_down"]:
-            flash(
-                f"Simultaneous downloads reduced from {result['previous']} to {result['current']}. "
-                "Active downloads will drain to the new limit.",
-                "success",
-            )
-        else:
-            flash(f"Simultaneous downloads remain set to {result['current']}.", "success")
         return redirect(request.referrer or url_for("dashboard"))
 
     @app.get("/api/jobs")

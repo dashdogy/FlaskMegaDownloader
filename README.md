@@ -32,7 +32,6 @@ Supported LXC guest OS versions:
 - Background worker thread with persisted JSON job history
 - Real `mega-get` support via MEGAcmd, plus an explicit fake backend for development only
 - Polling JSON API for live status updates every 1500 ms
-- Adjustable simultaneous download limit from the dashboard settings
 - Safe file explorer rooted inside configured destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
 - Cancel and retry job actions
@@ -85,8 +84,6 @@ Useful environment variables:
 - `MEGACMD_BINARY`: override the `mega-get` executable name/path
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
-- `MEGA_DOWNLOADER_MAX_CONCURRENT_DOWNLOADS`: default simultaneous download limit
-- `MEGA_DOWNLOADER_MAX_CONCURRENT_DOWNLOADS_LIMIT`: highest value offered in the dashboard setting
 
 Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
 

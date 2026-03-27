@@ -80,28 +80,6 @@ https://mega.nz/folder/..."></textarea>
                 <button type="submit" class="secondary-button">Restore Configured Destinations</button>
             </form>
         {% endif %}
-        <div class="settings-panel">
-            <div class="settings-copy">
-                <p class="eyebrow">Settings</p>
-                <h3>Simultaneous downloads</h3>
-                <p class="subtle">Choose how many queued links can download at the same time.</p>
-            </div>
-            <form action="{{ url_for('update_concurrency') }}" method="post" class="settings-form">
-                <label for="max_concurrent_downloads">Parallel downloads</label>
-                <div class="settings-controls">
-                    <select id="max_concurrent_downloads" name="max_concurrent_downloads">
-                        {% for choice in download_settings.concurrency_choices %}
-                            <option value="{{ choice }}" {% if choice == download_settings.max_concurrent_downloads %}selected{% endif %}>{{ choice }}</option>
-                        {% endfor %}
-                    </select>
-                    <button type="submit" class="secondary-button">Update</button>
-                </div>
-                <p class="subtle settings-note">
-                    Current limit: {{ download_settings.max_concurrent_downloads }}.
-                    Active downloads: {{ download_settings.active_downloads }}.
-                </p>
-            </form>
-        </div>
         <div class="backend-callout">
             <span>Downloader backend</span>
             <strong id="backend-label">{{ dashboard.backend.label }}</strong>
