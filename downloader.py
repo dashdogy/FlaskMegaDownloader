@@ -122,10 +122,35 @@ def parse_eta_seconds(text: str | None) -> int | None:
 
 def infer_display_name(url: str, fallback_prefix: str) -> str:
     parsed = urlparse(url)
+    if parsed.netloc.lower().endswith(("mega.nz", "mega.co.nz")):
+        return "Resolving file name..."
     name = unquote(Path(parsed.path).name).strip()
     if name:
         return name
     return f"{fallback_prefix}-{parsed.netloc or 'mega'}"
+
+
+def infer_downloaded_display_name(root: Path, before_snapshot: set[str]) -> str | None:
+    if not root.exists():
+        return None
+
+    created_top_levels: set[str] = set()
+    for path in root.rglob("*"):
+        relative_path = relative_to_root(root, path)
+        if not relative_path or relative_path in before_snapshot:
+            continue
+        top_level = relative_path.split("/", 1)[0].strip()
+        if not top_level or top_level.startswith("."):
+            continue
+        created_top_levels.add(top_level)
+
+    if not created_top_levels:
+        return None
+
+    display_name = sorted(created_top_levels)[0]
+    if display_name.lower().endswith(".mega") and len(display_name) > 5:
+        return display_name[:-5]
+    return display_name
 
 
 def snapshot_relative_paths(root: Path) -> set[str]:
@@ -311,6 +336,7 @@ class MegaDownloader:
         process_callback(process)
         progress_callback(status="starting", message=f"Launching {self.binary_name}.")
         saw_progress = False
+        discovered_display_name = False
 
         try:
             if process.stdout is not None:
@@ -322,6 +348,11 @@ class MegaDownloader:
                     if not line:
                         continue
                     parsed = parse_progress_line(line)
+                    if not discovered_display_name:
+                        created_name = infer_downloaded_display_name(destination_dir, before_snapshot)
+                        if created_name:
+                            parsed["display_name"] = created_name
+                            discovered_display_name = True
                     status = "downloading" if parsed else "probing"
                     progress_callback(status=status, message=line, **parsed)
                     if parsed:
