@@ -18,6 +18,7 @@ The helper script is idempotent:
 - Later runs update the managed checkout from GitHub, refresh the virtualenv, reinstall the systemd unit, and restart the service
 - `/etc/flask-mega-downloader/config.py` is created only once and then preserved across updates
 - MEGAcmd is installed from MEGA's official APT repo and the script prompts for `mega-login` if `www-data` is not already signed in
+- If the systemd service is not already enabled, the helper prompts to enable it so the app starts automatically after LXC reboot
 - Existing conflicting MEGA APT source entries are normalized automatically before package installation
 
 Supported LXC guest OS versions:

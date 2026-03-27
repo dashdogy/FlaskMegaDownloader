@@ -245,15 +245,48 @@ PY
   chmod 0644 "${CONFIG_FILE}"
 }
 
-install_service() {
+install_service_unit() {
   local service_source="${APP_DIR}/flask-mega-downloader.service"
   [[ -f "${service_source}" ]] || die "Service file not found at ${service_source}."
 
-  log "Installing systemd service."
+  log "Installing systemd service unit."
   install -m 0644 "${service_source}" "${SERVICE_DEST}"
   systemctl daemon-reload
-  systemctl enable "${SERVICE_NAME}"
-  systemctl restart "${SERVICE_NAME}"
+}
+
+configure_service() {
+  local reply
+
+  install_service_unit
+
+  if systemctl is-enabled --quiet "${SERVICE_NAME}" >/dev/null 2>&1; then
+    log "Restarting existing enabled systemd service."
+    systemctl restart "${SERVICE_NAME}"
+    return
+  fi
+
+  if [[ ! -t 0 ]]; then
+    log "Systemd service is not enabled yet. Enabling it automatically."
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+    return
+  fi
+
+  read -r -p "Enable the systemd service so the app starts automatically after LXC restart? [Y/n]: " reply
+  reply="${reply:-Y}"
+  if [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+    log "Enabling systemd service for automatic startup."
+    systemctl enable "${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}"
+    return
+  fi
+
+  if systemctl is-active --quiet "${SERVICE_NAME}" >/dev/null 2>&1; then
+    log "Service remains disabled, but restarting the currently running instance to apply updates."
+    systemctl restart "${SERVICE_NAME}"
+  else
+    warn "Systemd service installed but left disabled. Enable it later with: systemctl enable --now ${SERVICE_NAME}"
+  fi
 }
 
 mega_env_cmd() {
@@ -366,7 +399,7 @@ main() {
   setup_runtime_dirs
   setup_python_env
   write_default_config
-  install_service
+  configure_service
   prompt_mega_login
   print_summary
 }
