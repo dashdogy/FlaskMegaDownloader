@@ -107,7 +107,7 @@
         if (isPausedStatus(status)) {
             trackClass += " paused";
             fillClass += " paused";
-            const width = percent === null ? "35%" : `${percent.toFixed(1)}%`;
+            const width = percent === null ? "0%" : `${percent.toFixed(1)}%`;
             return `<div class="${trackClass}"><div class="${fillClass}" style="width:${width}"></div></div>`;
         }
 

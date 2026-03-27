@@ -263,6 +263,14 @@ def clamp_percent(value: float | int | None) -> float | None:
     return max(0.0, min(100.0, float(value)))
 
 
+def infer_percent_from_messages(messages: list[str]) -> float | None:
+    for message in reversed(messages):
+        match = PERCENT_RE.search(message or "")
+        if match:
+            return clamp_percent(match.group("percent"))
+    return None
+
+
 def looks_like_absolute_path(raw_path: str) -> bool:
     if not raw_path:
         return False
@@ -836,6 +844,8 @@ class DownloadManager:
             job.transfer.paused = True
             job.transfer.speed_bps = None
             job.transfer.eta_seconds = None
+            if job.transfer.percent is None and job.transfer.bytes_total:
+                job.transfer.percent = clamp_percent((job.transfer.bytes_done / job.transfer.bytes_total) * 100.0)
             job.touch()
             self._persist_locked(force=True)
             return job
@@ -850,6 +860,11 @@ class DownloadManager:
         job.transfer.paused = True
         job.transfer.speed_bps = None
         job.transfer.eta_seconds = None
+        if job.transfer.percent is None:
+            if job.transfer.bytes_total:
+                job.transfer.percent = clamp_percent((job.transfer.bytes_done / job.transfer.bytes_total) * 100.0)
+            else:
+                job.transfer.percent = infer_percent_from_messages(job.output_tail)
         job.append_output("Paused by user.")
         job.touch()
         self._persist_locked(force=True)
