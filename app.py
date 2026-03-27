@@ -179,6 +179,24 @@ def create_app() -> Flask:
             flash(str(exc), "error")
         return redirect(request.referrer or url_for("dashboard"))
 
+    @app.post("/jobs/<job_id>/pause")
+    def pause_job(job_id: str):
+        try:
+            manager.pause_job(job_id)
+            flash("Pause request sent.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/jobs/<job_id>/resume")
+    def resume_job(job_id: str):
+        try:
+            manager.resume_job(job_id)
+            flash("Resume request sent.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(request.referrer or url_for("dashboard"))
+
     @app.post("/jobs/clear")
     def clear_queue():
         result = manager.clear_queue()
@@ -186,7 +204,9 @@ def create_app() -> Flask:
         if result["removed"]:
             messages.append(f"Removed {result['removed']} job(s) from the queue.")
         if result["canceling"]:
-            messages.append(f"Canceling {result['canceling']} active job(s); they will disappear once cancellation finishes.")
+            messages.append(
+                f"Canceling {result['canceling']} running or paused job(s); they will disappear once cancellation finishes."
+            )
         if not messages:
             messages.append("Queue was already empty.")
         flash(" ".join(messages), "success")

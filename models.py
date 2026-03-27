@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 JOB_STATUSES = {
     "queued",
+    "paused",
     "starting",
     "probing",
     "downloading",
@@ -29,6 +30,7 @@ class TransferStatus:
     percent: float | None = None
     speed_bps: float | None = None
     eta_seconds: int | None = None
+    paused: bool = False
     started_at: str | None = None
     finished_at: str | None = None
     last_message: str = ""
@@ -45,6 +47,7 @@ class TransferStatus:
             percent=payload.get("percent"),
             speed_bps=payload.get("speed_bps"),
             eta_seconds=payload.get("eta_seconds"),
+            paused=bool(payload.get("paused", False)),
             started_at=payload.get("started_at"),
             finished_at=payload.get("finished_at"),
             last_message=payload.get("last_message", ""),

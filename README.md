@@ -34,7 +34,7 @@ Supported LXC guest OS versions:
 - Polling JSON API for live status updates every 1500 ms
 - Safe file explorer rooted inside configured destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
-- Cancel and retry job actions
+- Pause, resume, cancel, and retry job actions
 - Custom destination paths, including a saved favorites list for paths you reuse
 
 ## Project Layout

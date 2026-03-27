@@ -61,6 +61,7 @@
     };
 
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
+    const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
 
     const progressPercent = (transfer) => {
@@ -98,6 +99,13 @@
             return `<div class="${trackClass}"><div class="${fillClass}" style="width:${width}"></div></div>`;
         }
 
+        if (isPausedStatus(status)) {
+            trackClass += " paused";
+            fillClass += " paused";
+            const width = percent === null ? "35%" : `${percent.toFixed(1)}%`;
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:${width}"></div></div>`;
+        }
+
         if (status === "completed") {
             trackClass += " completed";
             fillClass += " completed";
@@ -112,10 +120,6 @@
             return `<div class="${trackClass}"><div class="${fillClass} indeterminate"></div></div>`;
         }
 
-        if (isActiveStatus(status)) {
-            fillClass += " active";
-        }
-
         return `<div class="${trackClass}"><div class="${fillClass}" style="width:${percent.toFixed(1)}%"></div></div>`;
     };
 
@@ -123,6 +127,9 @@
         const counts = batch.status_counts || {};
         if (counts.starting || counts.probing || counts.downloading || counts.queued) {
             return "active";
+        }
+        if (counts.paused) {
+            return "paused";
         }
         if (counts.failed || counts.canceled) {
             return "failed";
@@ -141,6 +148,7 @@
         summaryGrid.innerHTML = [
             ["Total Jobs", summary.total_jobs],
             ["Queued", summary.queued_jobs],
+            ["Paused", summary.paused_jobs],
             ["Active", summary.active_jobs],
             ["Completed", summary.completed_jobs],
             ["Throughput", formatSpeed(summary.throughput_bps)],
@@ -156,14 +164,24 @@
     const renderJob = (job) => {
         const percent = progressPercent(job.transfer);
         const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
-        const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
-        const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
+        const speedLabel = isPausedStatus(job.status) ? "Paused" : (isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps));
+        const etaLabel = isPausedStatus(job.status) ? "Paused" : (isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds));
 
         const openDestination = job.explorer_root
             ? `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.explorer_root)}&path=${encodeURIComponent(job.explorer_path || "")}">Open Destination</a>`
             : `<span class="subtle">Explorer unavailable for custom path</span>`;
 
         const actions = [
+            job.can_pause ? `
+                <form action="/jobs/${encodeURIComponent(job.id)}/pause" method="post">
+                    <button type="submit" class="secondary-button">Pause</button>
+                </form>
+            ` : "",
+            job.can_resume ? `
+                <form action="/jobs/${encodeURIComponent(job.id)}/resume" method="post">
+                    <button type="submit" class="secondary-button">Resume</button>
+                </form>
+            ` : "",
             job.can_cancel ? `
                 <form action="/jobs/${encodeURIComponent(job.id)}/cancel" method="post">
                     <button type="submit">Cancel</button>
@@ -207,6 +225,8 @@
         const visualStatus = batchVisualStatus(batch);
         const percent = batchProgressPercent(batch);
         const progressBar = buildProgressBar(visualStatus, percent, isActiveStatus(visualStatus) && percent === null);
+        const speedLabel = isPausedStatus(visualStatus) ? "Paused" : formatSpeed(batch.speed_bps);
+        const etaLabel = isPausedStatus(visualStatus) ? "Paused" : formatEta(batch.eta_seconds);
         const statusSummary = Object.entries(batch.status_counts)
             .map(([status, count]) => `${status}: ${count}`)
             .join(" | ");
@@ -218,13 +238,13 @@
                         <p class="eyebrow">Batch ${escapeHtml(batch.id)}</p>
                         <strong>${escapeHtml(`${batch.job_count} job(s)`)}</strong>
                     </div>
-                    <span class="status-pill">${escapeHtml(statusSummary || "No jobs")}</span>
+                    <span class="status-pill ${escapeHtml(visualStatus)}">${escapeHtml(statusSummary || "No jobs")}</span>
                 </div>
                 <div class="metric-row">
                     <span>${escapeHtml(formatBytes(batch.bytes_done))}</span>
                     <span>${escapeHtml(batch.has_unknown_total ? "Partial total" : formatBytes(batch.bytes_total))}</span>
-                    <span>${escapeHtml(formatSpeed(batch.speed_bps))}</span>
-                    <span>${escapeHtml(formatEta(batch.eta_seconds))}</span>
+                    <span>${escapeHtml(speedLabel)}</span>
+                    <span>${escapeHtml(etaLabel)}</span>
                 </div>
                 ${progressBar}
                 <div class="job-list">${batch.jobs.map(renderJob).join("")}</div>

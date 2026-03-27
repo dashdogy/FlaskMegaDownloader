@@ -1,0 +1,38 @@
+{
+  "jobs": [
+    {
+      "id": "2085c53993a6416cae192a2a167dc6aa",
+      "batch_id": "069cba3aa025",
+      "url": "https://example.local/sample.zip",
+      "destination_key": "downloads",
+      "destination_path": "C:\\Users\\mkrbl\\Documents\\VSCODE\\FlaskMegaDownloader\\pause-smoke-0d9uhjsb\\downloads",
+      "display_name": "sample.zip",
+      "destination_relative_path": "",
+      "destination_is_custom": false,
+      "status": "canceled",
+      "created_at": "2026-03-27T15:15:05.621953+00:00",
+      "updated_at": "2026-03-27T15:15:06.527185+00:00",
+      "error": "Canceled by user.",
+      "transfer": {
+        "bytes_done": 1363148,
+        "bytes_total": 27262976,
+        "percent": 4.999997065617488,
+        "speed_bps": null,
+        "eta_seconds": null,
+        "paused": false,
+        "started_at": "2026-03-27T15:15:05.623016+00:00",
+        "finished_at": "2026-03-27T15:15:06.527185+00:00",
+        "last_message": "Paused by user."
+      },
+      "output_tail": [
+        "Using fake downloader backend.",
+        "Estimated file size discovered.",
+        "Paused by user.",
+        "Simulating download progress.",
+        "Paused by user."
+      ]
+    }
+  ],
+  "favorites": [],
+  "hidden_base_destinations": []
+}

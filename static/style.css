@@ -319,7 +319,7 @@ button:disabled {
 
 .stat-grid {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 14px;
 }
 
@@ -390,6 +390,12 @@ button:disabled {
     color: var(--danger);
 }
 
+.status-pill.paused {
+    background: rgba(196, 148, 54, 0.16);
+    color: #8f6511;
+}
+
+.status-pill.active,
 .status-pill.downloading,
 .status-pill.probing,
 .status-pill.starting {
@@ -413,23 +419,6 @@ button:disabled {
     transition: width 220ms ease-out;
 }
 
-.progress-fill.active {
-    background:
-        linear-gradient(
-            115deg,
-            rgba(255, 255, 255, 0.18) 0%,
-            rgba(255, 255, 255, 0.18) 22%,
-            rgba(141, 181, 211, 0.92) 22%,
-            rgba(76, 122, 163, 0.98) 50%,
-            rgba(255, 255, 255, 0.18) 50%,
-            rgba(255, 255, 255, 0.18) 72%,
-            rgba(141, 181, 211, 0.92) 72%,
-            rgba(76, 122, 163, 0.98) 100%
-        );
-    background-size: 220px 100%;
-    animation: progress-flow 1.2s linear infinite;
-}
-
 .progress-fill.indeterminate {
     width: 35%;
     animation: pulse-slide 1.4s ease-in-out infinite;
@@ -444,6 +433,15 @@ button:disabled {
     animation: none;
 }
 
+.progress-track.paused {
+    background: rgba(196, 148, 54, 0.18);
+}
+
+.progress-fill.paused {
+    background: linear-gradient(90deg, #e3c37a 0%, #c49436 100%);
+    animation: none;
+}
+
 .progress-track.completed {
     background: rgba(44, 132, 96, 0.14);
 }
@@ -451,11 +449,6 @@ button:disabled {
 .progress-fill.completed {
     background: linear-gradient(90deg, #7fc4a4 0%, #2c8460 100%);
     animation: none;
-}
-
-@keyframes progress-flow {
-    0% { background-position: 220px 0; }
-    100% { background-position: 0 0; }
 }
 
 @keyframes pulse-slide {

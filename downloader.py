@@ -291,6 +291,7 @@ class MegaDownloader:
         destination_dir: Path,
         progress_callback: ProgressCallback,
         cancel_event: threading.Event,
+        pause_event: threading.Event,
         process_callback: ProcessCallback,
     ) -> None:
         binary = shutil.which(self.binary_name)
@@ -355,6 +356,7 @@ class FakeDownloader:
         destination_dir: Path,
         progress_callback: ProgressCallback,
         cancel_event: threading.Event,
+        pause_event: threading.Event,
         process_callback: ProcessCallback,
     ) -> None:
         process_callback(None)
@@ -375,10 +377,35 @@ class FakeDownloader:
         started = time.monotonic()
         chunk_count = 20
         step_size = max(total_bytes // chunk_count, 1)
+        pause_reported = False
         while bytes_done < total_bytes:
             if cancel_event.is_set():
                 raise DownloadCanceled("Canceled by user.")
+            while pause_event.is_set():
+                if not pause_reported:
+                    progress_callback(
+                        status="paused",
+                        speed_bps=None,
+                        eta_seconds=None,
+                        message="Paused by user.",
+                    )
+                    pause_reported = True
+                if cancel_event.wait(0.25):
+                    raise DownloadCanceled("Canceled by user.")
+                if not pause_event.is_set():
+                    progress_callback(
+                        status="downloading",
+                        speed_bps=None,
+                        eta_seconds=None,
+                        message="Resuming download.",
+                    )
+                    pause_reported = False
+                    break
             time.sleep(rng.uniform(0.15, 0.35))
+            if cancel_event.is_set():
+                raise DownloadCanceled("Canceled by user.")
+            if pause_event.is_set():
+                continue
             bytes_done = min(bytes_done + step_size, total_bytes)
             elapsed = max(time.monotonic() - started, 0.001)
             speed = bytes_done / elapsed
@@ -438,6 +465,7 @@ class UnavailableDownloader:
         destination_dir: Path,
         progress_callback: ProgressCallback,
         cancel_event: threading.Event,
+        pause_event: threading.Event,
         process_callback: ProcessCallback,
     ) -> None:
         process_callback(None)
@@ -464,6 +492,7 @@ class DownloadManager:
         self._stop_event = threading.Event()
         self._worker = threading.Thread(target=self._worker_loop, name="download-worker", daemon=True)
         self._cancel_events: dict[str, threading.Event] = {}
+        self._pause_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._purge_on_finish: set[str] = set()
@@ -495,10 +524,14 @@ class DownloadManager:
         loaded_jobs = self.storage.load_jobs()
         with self._lock:
             for job in loaded_jobs:
-                if job.status in {"queued", *ACTIVE_JOB_STATUSES}:
+                if job.status in ACTIVE_JOB_STATUSES:
                     job.status = "queued"
                     job.error = "Recovered after service restart."
                     job.transfer.finished_at = None
+                elif job.status == "paused":
+                    job.error = "Recovered after service restart. Resume to continue."
+                    job.transfer.finished_at = None
+                    job.transfer.paused = True
                 self._jobs[job.id] = job
             for job in self._jobs.values():
                 if job.status == "queued":
@@ -546,6 +579,8 @@ class DownloadManager:
         self._stop_event.set()
         for cancel_event in self._cancel_events.values():
             cancel_event.set()
+        for pause_event in self._pause_events.values():
+            pause_event.clear()
 
     def has_destinations(self) -> bool:
         return bool(self.destinations)
@@ -669,10 +704,10 @@ class DownloadManager:
             if len(self.destinations) <= 1:
                 raise ValueError("At least one destination must remain. Restore or add another destination before deleting this one.")
             if any(
-                job.destination_key == destination_key and job.status in {"queued", *ACTIVE_JOB_STATUSES}
+                job.destination_key == destination_key and job.status in {"queued", "paused", *ACTIVE_JOB_STATUSES}
                 for job in self._jobs.values()
             ):
-                raise ValueError("That destination is still in use by a queued or active job.")
+                raise ValueError("That destination is still in use by a queued, paused, or active job.")
 
             destination = self.destinations[destination_key]
             if destination_key in self.favorite_destinations:
@@ -715,6 +750,15 @@ class DownloadManager:
         return None, ""
 
     def _cancel_active_mega_downloads(self) -> None:
+        self._run_mega_transfers_command("-c")
+
+    def _pause_active_mega_downloads(self) -> None:
+        self._run_mega_transfers_command("-p")
+
+    def _resume_active_mega_downloads(self) -> None:
+        self._run_mega_transfers_command("-r")
+
+    def _run_mega_transfers_command(self, action_flag: str) -> None:
         if self.backend_name != "mega":
             return
 
@@ -724,7 +768,7 @@ class DownloadManager:
 
         try:
             subprocess.run(
-                [transfers_binary, "-c", "-a", "--only-downloads"],
+                [transfers_binary, action_flag, "-a", "--only-downloads"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -737,11 +781,74 @@ class DownloadManager:
     def _request_cancel_locked(self, job_id: str) -> Job:
         job = self._require_job(job_id)
         cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
+        pause_event = self._pause_events.get(job_id)
+        if pause_event:
+            pause_event.clear()
         cancel_event.set()
         self._cancel_active_mega_downloads()
         process = self._active_processes.get(job_id)
         if process and process.poll() is None:
             process.terminate()
+        return job
+
+    def _has_live_runtime_locked(self, job_id: str) -> bool:
+        process = self._active_processes.get(job_id)
+        if process and process.poll() is None:
+            return True
+        return job_id in self._cancel_events or job_id in self._pause_events
+
+    def _request_pause_locked(self, job_id: str) -> Job:
+        job = self._require_job(job_id)
+        if job.status == "queued":
+            job.status = "paused"
+            job.error = None
+            job.transfer.paused = True
+            job.transfer.speed_bps = None
+            job.transfer.eta_seconds = None
+            job.touch()
+            self._persist_locked(force=True)
+            return job
+        if job.status not in ACTIVE_JOB_STATUSES:
+            raise ValueError("Only queued or active jobs can be paused.")
+
+        pause_event = self._pause_events.setdefault(job_id, threading.Event())
+        pause_event.set()
+        self._pause_active_mega_downloads()
+        job.status = "paused"
+        job.error = None
+        job.transfer.paused = True
+        job.transfer.speed_bps = None
+        job.transfer.eta_seconds = None
+        job.append_output("Paused by user.")
+        job.touch()
+        self._persist_locked(force=True)
+        return job
+
+    def _request_resume_locked(self, job_id: str) -> Job:
+        job = self._require_job(job_id)
+        if job.status != "paused":
+            raise ValueError("Only paused jobs can be resumed.")
+
+        pause_event = self._pause_events.get(job_id)
+        has_active_process = self._has_live_runtime_locked(job_id)
+        job.error = None
+        job.transfer.paused = False
+        job.transfer.finished_at = None
+
+        if pause_event and has_active_process:
+            pause_event.clear()
+            self._resume_active_mega_downloads()
+            job.status = "downloading"
+            job.append_output("Resuming download.")
+            job.touch()
+            self._persist_locked(force=True)
+            return job
+
+        job.status = "queued"
+        job.append_output("Queued to resume.")
+        job.touch()
+        self._queue.put(job.id)
+        self._persist_locked(force=True)
         return job
 
     def cancel_job(self, job_id: str) -> Job:
@@ -754,15 +861,32 @@ class DownloadManager:
                 job.touch()
                 self._persist_locked(force=True)
                 return job
+            if job.status == "paused" and not self._has_live_runtime_locked(job_id):
+                job.status = "canceled"
+                job.error = "Canceled while paused."
+                job.transfer.paused = False
+                job.transfer.finished_at = utcnow_iso()
+                job.touch()
+                self._pause_events.pop(job_id, None)
+                self._persist_locked(force=True)
+                return job
 
             return self._request_cancel_locked(job_id)
+
+    def pause_job(self, job_id: str) -> Job:
+        with self._lock:
+            return self._request_pause_locked(job_id)
+
+    def resume_job(self, job_id: str) -> Job:
+        with self._lock:
+            return self._request_resume_locked(job_id)
 
     def clear_queue(self) -> dict[str, int]:
         with self._lock:
             removed = 0
             canceling = 0
             for job_id, job in list(self._jobs.items()):
-                if job.status in ACTIVE_JOB_STATUSES:
+                if job.status in ACTIVE_JOB_STATUSES or (job.status == "paused" and self._has_live_runtime_locked(job_id)):
                     canceling += 1
                     self._purge_on_finish.add(job_id)
                     self._request_cancel_locked(job_id)
@@ -771,6 +895,7 @@ class DownloadManager:
                 removed += 1
                 self._jobs.pop(job_id, None)
                 self._cancel_events.pop(job_id, None)
+                self._pause_events.pop(job_id, None)
                 self._active_processes.pop(job_id, None)
                 self._progress_samples.pop(job_id, None)
                 self._purge_on_finish.discard(job_id)
@@ -789,6 +914,7 @@ class DownloadManager:
             job.transfer = TransferStatus()
             job.touch()
             self._cancel_events.pop(job_id, None)
+            self._pause_events.pop(job_id, None)
             self._progress_samples.pop(job_id, None)
             self._purge_on_finish.discard(job_id)
             self._queue.put(job.id)
@@ -805,6 +931,7 @@ class DownloadManager:
         summary = {
             "total_jobs": 0,
             "queued_jobs": 0,
+            "paused_jobs": 0,
             "active_jobs": 0,
             "completed_jobs": 0,
             "failed_jobs": 0,
@@ -819,6 +946,8 @@ class DownloadManager:
             summary["total_jobs"] += 1
             if job["status"] == "queued":
                 summary["queued_jobs"] += 1
+            elif job["status"] == "paused":
+                summary["paused_jobs"] += 1
             elif job["status"] in ACTIVE_JOB_STATUSES:
                 summary["active_jobs"] += 1
             elif job["status"] == "completed":
@@ -891,6 +1020,10 @@ class DownloadManager:
         payload["explorer_root"] = explorer_root
         payload["explorer_path"] = explorer_path
         payload["can_cancel"] = job.status == "queued" or job.status in ACTIVE_JOB_STATUSES
+        payload["can_pause"] = job.status == "queued" or job.status in ACTIVE_JOB_STATUSES
+        payload["can_resume"] = job.status == "paused"
+        if job.status == "paused":
+            payload["can_cancel"] = True
         payload["can_retry"] = job.status in RETRYABLE_JOB_STATUSES
         payload["status_label"] = job.status.replace("_", " ").title()
         return payload
@@ -907,9 +1040,11 @@ class DownloadManager:
                 if not job or job.status != "queued":
                     continue
                 cancel_event = self._cancel_events[job_id] = threading.Event()
+                pause_event = self._pause_events[job_id] = threading.Event()
                 self._progress_samples[job_id] = (time.monotonic(), 0)
                 job.status = "starting"
                 job.error = None
+                job.transfer.paused = False
                 job.transfer.started_at = utcnow_iso()
                 job.transfer.finished_at = None
                 job.touch()
@@ -926,6 +1061,7 @@ class DownloadManager:
                     destination_dir=destination_dir,
                     progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
                     cancel_event=cancel_event,
+                    pause_event=pause_event,
                     process_callback=lambda process: self._set_active_process(job.id, process),
                 )
             except DownloadCanceled as exc:
@@ -937,6 +1073,7 @@ class DownloadManager:
             finally:
                 with self._lock:
                     self._cancel_events.pop(job_id, None)
+                    self._pause_events.pop(job_id, None)
                     self._active_processes.pop(job_id, None)
                     self._progress_samples.pop(job_id, None)
 
@@ -951,8 +1088,12 @@ class DownloadManager:
         with self._lock:
             job = self._require_job(job_id)
             status = kwargs.get("status")
-            if status in JOB_STATUSES:
+            pause_event = self._pause_events.get(job_id)
+            pause_requested = bool(pause_event and pause_event.is_set())
+            if status in JOB_STATUSES and not (pause_requested and status in ACTIVE_JOB_STATUSES):
                 job.status = status
+            if job.status == "paused":
+                job.transfer.paused = True
             if "display_name" in kwargs and kwargs["display_name"]:
                 job.display_name = kwargs["display_name"]
 
@@ -979,6 +1120,13 @@ class DownloadManager:
                 transfer.bytes_done = max(transfer.bytes_done, derived_bytes_done)
             elif transfer.bytes_total and transfer.bytes_total > 0:
                 transfer.percent = clamp_percent((transfer.bytes_done / transfer.bytes_total) * 100.0)
+
+            if pause_requested:
+                transfer.paused = True
+                transfer.speed_bps = None
+                transfer.eta_seconds = None
+            elif status in ACTIVE_JOB_STATUSES:
+                transfer.paused = False
 
             self._derive_transfer_metrics(
                 job_id,
@@ -1032,6 +1180,7 @@ class DownloadManager:
             if job_id in self._purge_on_finish:
                 self._jobs.pop(job_id, None)
                 self._cancel_events.pop(job_id, None)
+                self._pause_events.pop(job_id, None)
                 self._active_processes.pop(job_id, None)
                 self._progress_samples.pop(job_id, None)
                 self._purge_on_finish.discard(job_id)
@@ -1046,6 +1195,7 @@ class DownloadManager:
                 job.transfer.eta_seconds = 0
             if status == "completed":
                 job.transfer.percent = 100.0
+            job.transfer.paused = False
             job.transfer.speed_bps = None
             job.touch()
             self._persist_locked(force=True)
