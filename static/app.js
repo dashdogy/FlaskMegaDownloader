@@ -60,6 +60,11 @@
         return Math.max(0, Math.min(100, Number(value)));
     };
 
+    const parsePercentFromMessage = (message) => {
+        const match = String(message || "").match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+        return match ? clampPercent(match[1]) : null;
+    };
+
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
@@ -68,7 +73,7 @@
         if (transfer?.bytes_total) {
             return clampPercent((transfer.bytes_done / transfer.bytes_total) * 100);
         }
-        return clampPercent(transfer?.percent);
+        return clampPercent(transfer?.percent) ?? parsePercentFromMessage(transfer?.last_message);
     };
 
     const batchProgressPercent = (batch) => {
