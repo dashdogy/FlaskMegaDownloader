@@ -15,7 +15,7 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from queue import Empty, Queue
 import shlex
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -158,6 +158,12 @@ def normalize_fake_display_name(url: str, fallback_prefix: str) -> str:
     return inferred_name
 
 
+def is_mega_folder_url(url: str) -> bool:
+    parsed = urlparse(url)
+    combined = f"{parsed.path}#{parsed.fragment}".lower()
+    return "/folder/" in combined or combined.startswith("#f!") or "/collection/" in combined
+
+
 def parse_megacmd_ls_summary(output: str) -> list[dict]:
     entries: list[dict] = []
     for raw_line in output.splitlines():
@@ -166,6 +172,15 @@ def parse_megacmd_ls_summary(output: str) -> list[dict]:
             continue
         match = MEGACMD_LS_SUMMARY_RE.match(line)
         if not match:
+            fallback_name = normalize_remote_display_name(line)
+            if fallback_name and not line.lower().startswith(("info:", "warning:", "error:")):
+                entries.append(
+                    {
+                        "flags": "",
+                        "size": 0,
+                        "name": fallback_name,
+                    }
+                )
             continue
         entries.append(
             {
@@ -370,7 +385,14 @@ class MegaDownloader:
     def available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
-    def _run_metadata_command(self, companion_name: str, args: list[str]) -> str:
+    def _run_metadata_command(
+        self,
+        companion_name: str,
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = 30,
+    ) -> str:
         binary = find_megacmd_companion_binary(self.binary_name, companion_name)
         if not binary:
             raise DownloadError(f"'{companion_name}' was not found in PATH.")
@@ -380,17 +402,98 @@ class MegaDownloader:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=30,
+            timeout=timeout,
             check=False,
+            env=env,
         )
         output = (result.stdout or "").strip()
         if result.returncode != 0:
             raise DownloadError(output or f"{companion_name} exited with code {result.returncode}.")
         return output
 
+    def _merge_metadata_from_outputs(
+        self,
+        url: str,
+        fallback_prefix: str,
+        *,
+        ls_output: str | None = None,
+        du_output: str | None = None,
+        display_name: str | None = None,
+        bytes_total: int | None = None,
+    ) -> dict:
+        resolved_name = display_name or infer_display_name(url, fallback_prefix)
+        resolved_bytes_total = bytes_total
+
+        ls_entries = parse_megacmd_ls_summary(ls_output or "")
+        if ls_entries:
+            if len(ls_entries) == 1:
+                entry = ls_entries[0]
+                single_name = normalize_remote_display_name(entry["name"])
+                if single_name:
+                    resolved_name = single_name
+                if not str(entry["flags"]).startswith("d") and int(entry["size"]) > 0:
+                    resolved_bytes_total = int(entry["size"])
+            else:
+                top_levels = {
+                    normalize_remote_display_name(str(entry["name"]).split("/", 1)[0])
+                    for entry in ls_entries
+                }
+                top_levels = {item for item in top_levels if item}
+                if len(top_levels) == 1:
+                    resolved_name = sorted(top_levels)[0]
+
+        du_size, du_name = parse_megacmd_du_summary(du_output or "")
+        if du_size is not None:
+            resolved_bytes_total = du_size
+        if du_name:
+            resolved_name = du_name
+
+        return {
+            "display_name": resolved_name,
+            "bytes_total": resolved_bytes_total,
+        }
+
+    def _probe_metadata_via_isolated_public_session(self, url: str, fallback_prefix: str) -> dict:
+        with TemporaryDirectory(prefix="mega-public-meta-") as temp_home:
+            env = dict(os.environ)
+            env["HOME"] = temp_home
+            ls_output = ""
+            du_output = ""
+            pwd_output = ""
+            try:
+                self._run_metadata_command("mega-login", [url], env=env, timeout=30)
+                ls_output = self._run_metadata_command(
+                    "mega-ls",
+                    ["-l", "--time-format=ISO6081_WITH_TIME", "/"],
+                    env=env,
+                    timeout=30,
+                )
+                du_output = self._run_metadata_command("mega-du", ["/"], env=env, timeout=30)
+                try:
+                    pwd_output = self._run_metadata_command("mega-pwd", [], env=env, timeout=10)
+                except DownloadError:
+                    pwd_output = ""
+            finally:
+                for companion_name in ("mega-logout", "mega-quit"):
+                    try:
+                        self._run_metadata_command(companion_name, [], env=env, timeout=10)
+                    except DownloadError:
+                        pass
+
+        metadata = self._merge_metadata_from_outputs(
+            url,
+            fallback_prefix,
+            ls_output=ls_output,
+            du_output=du_output,
+        )
+        pwd_name = normalize_remote_display_name(pwd_output)
+        if pwd_name and is_mega_folder_url(url):
+            metadata["display_name"] = pwd_name
+        elif metadata["display_name"] == "Resolving file name..." and pwd_name:
+            metadata["display_name"] = pwd_name
+        return metadata
+
     def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
-        display_name = infer_display_name(url, fallback_prefix)
-        bytes_total: int | None = None
         ls_error: str | None = None
         du_error: str | None = None
 
@@ -401,45 +504,39 @@ class MegaDownloader:
             )
         except DownloadError as exc:
             ls_error = str(exc)
-            ls_entries: list[dict] = []
         else:
-            ls_entries = parse_megacmd_ls_summary(ls_output)
-
-        if ls_entries:
-            if len(ls_entries) == 1:
-                entry = ls_entries[0]
-                resolved_name = normalize_remote_display_name(entry["name"])
-                if resolved_name:
-                    display_name = resolved_name
-                if not str(entry["flags"]).startswith("d"):
-                    bytes_total = int(entry["size"])
-            else:
-                top_levels = {
-                    normalize_remote_display_name(str(entry["name"]).split("/", 1)[0])
-                    for entry in ls_entries
-                }
-                top_levels = {item for item in top_levels if item}
-                if len(top_levels) == 1:
-                    display_name = sorted(top_levels)[0]
+            ls_output = ls_output
 
         try:
             du_output = self._run_metadata_command("mega-du", [url])
         except DownloadError as exc:
             du_error = str(exc)
+            du_output = ""
         else:
-            du_size, du_name = parse_megacmd_du_summary(du_output)
-            if du_size is not None:
-                bytes_total = du_size
-            if du_name:
-                display_name = du_name
+            du_output = du_output
 
-        if bytes_total is None and ls_error and du_error:
+        metadata = self._merge_metadata_from_outputs(
+            url,
+            fallback_prefix,
+            ls_output=ls_output if not ls_error else "",
+            du_output=du_output,
+        )
+
+        if is_mega_folder_url(url):
+            try:
+                isolated_metadata = self._probe_metadata_via_isolated_public_session(url, fallback_prefix)
+            except DownloadError:
+                isolated_metadata = {}
+            else:
+                if isolated_metadata.get("display_name"):
+                    metadata["display_name"] = isolated_metadata["display_name"]
+                if isolated_metadata.get("bytes_total") is not None:
+                    metadata["bytes_total"] = isolated_metadata["bytes_total"]
+
+        if metadata["bytes_total"] is None and ls_error and du_error:
             raise DownloadError(f"Could not resolve metadata. ls: {ls_error} du: {du_error}")
 
-        return {
-            "display_name": display_name,
-            "bytes_total": bytes_total,
-        }
+        return metadata
 
     def _terminate_process(self, process: subprocess.Popen) -> None:
         if process.poll() is not None:
