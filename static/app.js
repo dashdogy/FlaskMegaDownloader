@@ -86,6 +86,10 @@
             ? '<div class="progress-fill indeterminate"></div>'
             : `<div class="progress-fill" style="width:${percent.toFixed(1)}%"></div>`;
 
+        const openDestination = job.explorer_root
+            ? `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.explorer_root)}&path=${encodeURIComponent(job.explorer_path || "")}">Open Destination</a>`
+            : `<span class="subtle">Explorer unavailable for custom path</span>`;
+
         const actions = [
             job.can_cancel ? `
                 <form action="/jobs/${encodeURIComponent(job.id)}/cancel" method="post">
@@ -97,7 +101,7 @@
                     <button type="submit">Retry</button>
                 </form>
             ` : "",
-            `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.destination_key)}&path=${encodeURIComponent(job.destination_relative_path || "")}">Open Destination</a>`,
+            openDestination,
         ].join("");
 
         return `

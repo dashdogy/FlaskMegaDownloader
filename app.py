@@ -50,7 +50,7 @@ def parse_urls(raw_text: str) -> list[str]:
     return urls
 
 
-def normalize_destination_subpath(raw_text: str) -> str:
+def normalize_destination_path_input(raw_text: str) -> str:
     cleaned = (raw_text or "").strip().replace("\\", "/")
     if not cleaned or cleaned == ".":
         return ""
@@ -103,7 +103,7 @@ def create_app() -> Flask:
     def submit():
         urls = parse_urls(request.form.get("urls", ""))
         destination_key = request.form.get("destination", "")
-        destination_subpath = normalize_destination_subpath(request.form.get("destination_path", ""))
+        destination_subpath = normalize_destination_path_input(request.form.get("destination_path", ""))
         if not urls:
             flash("Paste at least one MEGA URL.", "error")
             return redirect(url_for("dashboard"))

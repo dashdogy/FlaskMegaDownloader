@@ -58,6 +58,7 @@ class Job:
     destination_path: str
     display_name: str
     destination_relative_path: str = ""
+    destination_is_custom: bool = False
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -91,6 +92,7 @@ class Job:
             destination_path=data["destination_path"],
             destination_relative_path=data.get("destination_relative_path", ""),
             display_name=data.get("display_name") or data["url"],
+            destination_is_custom=bool(data.get("destination_is_custom", False)),
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),
             updated_at=data.get("updated_at", utcnow_iso()),

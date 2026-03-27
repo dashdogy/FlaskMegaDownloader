@@ -10,6 +10,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
+from pathlib import PureWindowsPath
 from queue import Empty, Queue
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
@@ -117,6 +118,13 @@ def parse_progress_line(line: str) -> dict:
         update["eta_seconds"] = eta
 
     return update
+
+
+def looks_like_absolute_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    path = raw_path.strip()
+    return Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
 class MegaDownloader:
@@ -355,17 +363,22 @@ class DownloadManager:
             raise ValueError(f"Unknown destination '{destination_key}'.")
         return self.destinations[destination_key]["path"]
 
-    def resolve_destination(self, destination_key: str, destination_subpath: str = "") -> tuple[Path, str]:
+    def resolve_destination(self, destination_key: str, destination_subpath: str = "") -> tuple[Path, str, bool]:
         root = self.get_destination_path(destination_key)
-        normalized_subpath = (destination_subpath or "").strip().replace("\\", "/")
+        normalized_subpath = (destination_subpath or "").strip()
+        if looks_like_absolute_path(normalized_subpath):
+            resolved_path = Path(normalized_subpath).expanduser().resolve()
+            return resolved_path, "", True
+
+        normalized_subpath = normalized_subpath.replace("\\", "/")
         resolved_path = path_within_root(root, normalized_subpath)
         relative_path = relative_to_root(root, resolved_path)
-        return resolved_path, relative_path
+        return resolved_path, relative_path, False
 
     def submit(self, urls: list[str], destination_key: str, destination_subpath: str = "") -> list[Job]:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
-        destination_path, destination_relative_path = self.resolve_destination(destination_key, destination_subpath)
+        destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
         batch_id = uuid.uuid4().hex[:12]
         new_jobs: list[Job] = []
         with self._lock:
@@ -379,6 +392,7 @@ class DownloadManager:
                     destination_path=str(destination_path),
                     destination_relative_path=destination_relative_path,
                     display_name=infer_display_name(url, f"job-{job_id[:8]}"),
+                    destination_is_custom=destination_is_custom,
                     transfer=TransferStatus(started_at=None),
                 )
                 self._jobs[job.id] = job
@@ -386,6 +400,17 @@ class DownloadManager:
                 self._queue.put(job.id)
             self._persist_locked(force=True)
         return new_jobs
+
+    def build_explorer_target(self, job: Job) -> tuple[str | None, str]:
+        if not job.destination_is_custom:
+            return job.destination_key, job.destination_relative_path
+
+        destination_path = Path(job.destination_path).expanduser().resolve()
+        for key, item in self.destinations.items():
+            root = item["path"]
+            if destination_path == root or root in destination_path.parents:
+                return key, relative_to_root(root, destination_path)
+        return None, ""
 
     def cancel_job(self, job_id: str) -> Job:
         with self._lock:
@@ -507,11 +532,14 @@ class DownloadManager:
     def _job_payload(self, job: Job, destination_lookup: dict[str, str]) -> dict:
         payload = job.to_dict()
         payload["destination_label"] = destination_lookup.get(job.destination_key, job.destination_key)
-        payload["destination_display"] = (
+        payload["destination_display"] = str(job.destination_path) if job.destination_is_custom else (
             f"{payload['destination_label']} / {job.destination_relative_path}"
             if job.destination_relative_path
             else payload["destination_label"]
         )
+        explorer_root, explorer_path = self.build_explorer_target(job)
+        payload["explorer_root"] = explorer_root
+        payload["explorer_path"] = explorer_path
         payload["can_cancel"] = job.status in {"queued", *ACTIVE_JOB_STATUSES}
         payload["can_retry"] = job.status in RETRYABLE_JOB_STATUSES
         payload["status_label"] = job.status.replace("_", " ").title()
@@ -534,7 +562,10 @@ class DownloadManager:
                 job.transfer.started_at = utcnow_iso()
                 job.transfer.finished_at = None
                 job.touch()
-                destination_dir, _ = self.resolve_destination(job.destination_key, job.destination_relative_path)
+                destination_dir, _, _ = self.resolve_destination(
+                    job.destination_key,
+                    job.destination_path if job.destination_is_custom else job.destination_relative_path,
+                )
                 destination_dir.mkdir(parents=True, exist_ok=True)
                 self._persist_locked(force=True)
 
