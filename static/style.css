@@ -262,6 +262,17 @@ button,
     margin-bottom: 18px;
 }
 
+.section-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.inline-form {
+    margin: 0;
+}
+
 .stat-grid {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -362,6 +373,23 @@ button,
     animation: pulse-slide 1.4s ease-in-out infinite;
 }
 
+.progress-track.failed {
+    background: rgba(175, 77, 87, 0.16);
+}
+
+.progress-fill.failed {
+    background: linear-gradient(90deg, #d58992 0%, #af4d57 100%);
+    animation: none;
+}
+
+.progress-track.completed {
+    background: rgba(44, 132, 96, 0.14);
+}
+
+.progress-fill.completed {
+    background: linear-gradient(90deg, #7fc4a4 0%, #2c8460 100%);
+}
+
 @keyframes pulse-slide {
     0% { transform: translateX(-140%); }
     50% { transform: translateX(120%); }
@@ -401,6 +429,11 @@ button,
 
 .job-actions form {
     margin: 0;
+}
+
+.danger-button {
+    background: linear-gradient(135deg, #cf7a83 0%, var(--danger) 100%);
+    color: white;
 }
 
 .flash-stack {

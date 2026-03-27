@@ -434,6 +434,7 @@ class DownloadManager:
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
+        self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
         self.backend_reason: str | None = None
@@ -631,6 +632,31 @@ class DownloadManager:
                 process.terminate()
             return job
 
+    def clear_queue(self) -> dict[str, int]:
+        with self._lock:
+            removed = 0
+            canceling = 0
+            for job_id, job in list(self._jobs.items()):
+                if job.status in ACTIVE_JOB_STATUSES:
+                    canceling += 1
+                    self._purge_on_finish.add(job_id)
+                    cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
+                    cancel_event.set()
+                    process = self._active_processes.get(job_id)
+                    if process and process.poll() is None:
+                        process.terminate()
+                    continue
+
+                removed += 1
+                self._jobs.pop(job_id, None)
+                self._cancel_events.pop(job_id, None)
+                self._active_processes.pop(job_id, None)
+                self._progress_samples.pop(job_id, None)
+                self._purge_on_finish.discard(job_id)
+
+            self._persist_locked(force=True)
+            return {"removed": removed, "canceling": canceling}
+
     def retry_job(self, job_id: str) -> Job:
         with self._lock:
             job = self._require_job(job_id)
@@ -643,6 +669,7 @@ class DownloadManager:
             job.touch()
             self._cancel_events.pop(job_id, None)
             self._progress_samples.pop(job_id, None)
+            self._purge_on_finish.discard(job_id)
             self._queue.put(job.id)
             self._persist_locked(force=True)
             return job
@@ -873,7 +900,19 @@ class DownloadManager:
 
     def _finish_job(self, job_id: str, status: str, error: str | None) -> None:
         with self._lock:
-            job = self._require_job(job_id)
+            job = self._jobs.get(job_id)
+            if job is None:
+                return
+
+            if job_id in self._purge_on_finish:
+                self._jobs.pop(job_id, None)
+                self._cancel_events.pop(job_id, None)
+                self._active_processes.pop(job_id, None)
+                self._progress_samples.pop(job_id, None)
+                self._purge_on_finish.discard(job_id)
+                self._persist_locked(force=True)
+                return
+
             job.status = status
             job.error = error
             job.transfer.finished_at = utcnow_iso()

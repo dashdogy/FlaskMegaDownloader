@@ -159,6 +159,19 @@ def create_app() -> Flask:
             flash(str(exc), "error")
         return redirect(request.referrer or url_for("dashboard"))
 
+    @app.post("/jobs/clear")
+    def clear_queue():
+        result = manager.clear_queue()
+        messages: list[str] = []
+        if result["removed"]:
+            messages.append(f"Removed {result['removed']} job(s) from the queue.")
+        if result["canceling"]:
+            messages.append(f"Canceling {result['canceling']} active job(s); they will disappear once cancellation finishes.")
+        if not messages:
+            messages.append("Queue was already empty.")
+        flash(" ".join(messages), "success")
+        return redirect(request.referrer or url_for("dashboard"))
+
     @app.get("/explorer")
     def explorer():
         destination_options = manager.destination_options()

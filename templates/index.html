@@ -80,7 +80,12 @@ https://mega.nz/folder/..."></textarea>
             <p class="eyebrow">Batches</p>
             <h2>Queued jobs</h2>
         </div>
-        <p class="subtle">Polling every {{ poll_interval_ms }} ms</p>
+        <div class="section-actions">
+            <p class="subtle">Polling every {{ poll_interval_ms }} ms</p>
+            <form action="{{ url_for('clear_queue') }}" method="post" class="inline-form">
+                <button type="submit" class="danger-button">Clear Queue</button>
+            </form>
+        </div>
     </div>
     <div id="batch-list" class="batch-stack"></div>
 </section>

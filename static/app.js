@@ -60,6 +60,46 @@
         return Math.max(0, Math.min(100, (bytesDone / bytesTotal) * 100));
     };
 
+    const isStoppedStatus = (status) => status === "failed" || status === "canceled";
+
+    const buildProgressBar = (status, percent, hasUnknownTotal = false) => {
+        let trackClass = "progress-track";
+        let fillClass = "progress-fill";
+
+        if (isStoppedStatus(status)) {
+            trackClass += " failed";
+            fillClass += " failed";
+            const width = percent === null ? "100%" : `${percent.toFixed(1)}%`;
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:${width}"></div></div>`;
+        }
+
+        if (status === "completed") {
+            trackClass += " completed";
+            fillClass += " completed";
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:100%"></div></div>`;
+        }
+
+        if (percent === null || hasUnknownTotal) {
+            return `<div class="${trackClass}"><div class="${fillClass} indeterminate"></div></div>`;
+        }
+
+        return `<div class="${trackClass}"><div class="${fillClass}" style="width:${percent.toFixed(1)}%"></div></div>`;
+    };
+
+    const batchVisualStatus = (batch) => {
+        const counts = batch.status_counts || {};
+        if (counts.starting || counts.probing || counts.downloading || counts.queued) {
+            return "active";
+        }
+        if (counts.failed || counts.canceled) {
+            return "failed";
+        }
+        if (counts.completed) {
+            return "completed";
+        }
+        return "queued";
+    };
+
     const renderSummary = (summary) => {
         const totalLabel = summary.has_unknown_total
             ? `${formatBytes(summary.bytes_done)} / partial total`
@@ -82,9 +122,9 @@
 
     const renderJob = (job) => {
         const percent = progressPercent(job.transfer.bytes_done, job.transfer.bytes_total);
-        const progressBar = percent === null
-            ? '<div class="progress-fill indeterminate"></div>'
-            : `<div class="progress-fill" style="width:${percent.toFixed(1)}%"></div>`;
+        const progressBar = buildProgressBar(job.status, percent);
+        const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
+        const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
 
         const openDestination = job.explorer_root
             ? `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.explorer_root)}&path=${encodeURIComponent(job.explorer_path || "")}">Open Destination</a>`
@@ -117,10 +157,10 @@
                     <span>${escapeHtml(job.destination_display)}</span>
                     <span>${escapeHtml(formatBytes(job.transfer.bytes_done))}</span>
                     <span>${escapeHtml(job.transfer.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>
-                    <span>${escapeHtml(formatSpeed(job.transfer.speed_bps))}</span>
-                    <span>${escapeHtml(formatEta(job.transfer.eta_seconds))}</span>
+                    <span>${escapeHtml(speedLabel)}</span>
+                    <span>${escapeHtml(etaLabel)}</span>
                 </div>
-                <div class="progress-track">${progressBar}</div>
+                ${progressBar}
                 <div class="metric-row">
                     <span>${escapeHtml(job.transfer.last_message || "Waiting for worker output.")}</span>
                 </div>
@@ -132,9 +172,7 @@
 
     const renderBatch = (batch) => {
         const percent = progressPercent(batch.bytes_done, batch.bytes_total);
-        const progressBar = (percent === null || batch.has_unknown_total)
-            ? '<div class="progress-fill indeterminate"></div>'
-            : `<div class="progress-fill" style="width:${percent.toFixed(1)}%"></div>`;
+        const progressBar = buildProgressBar(batchVisualStatus(batch), percent, batch.has_unknown_total);
         const statusSummary = Object.entries(batch.status_counts)
             .map(([status, count]) => `${status}: ${count}`)
             .join(" | ");
@@ -154,7 +192,7 @@
                     <span>${escapeHtml(formatSpeed(batch.speed_bps))}</span>
                     <span>${escapeHtml(formatEta(batch.eta_seconds))}</span>
                 </div>
-                <div class="progress-track">${progressBar}</div>
+                ${progressBar}
                 <div class="job-list">${batch.jobs.map(renderJob).join("")}</div>
             </section>
         `;
