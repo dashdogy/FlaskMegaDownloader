@@ -124,6 +124,22 @@
         return match ? clampPercent(match[1]) : null;
     };
 
+    const formatPercentLabel = (value) => {
+        const percent = clampPercent(value);
+        if (percent === null) {
+            return null;
+        }
+        if (percent >= 100 || Number.isInteger(percent)) {
+            return `${percent.toFixed(0)}%`;
+        }
+        if (percent >= 10) {
+            return `${percent.toFixed(1)}%`;
+        }
+        return `${percent.toFixed(2)}%`;
+    };
+
+    const isTransferDebugMessage = (message) => /^TRANSFERRING\b/i.test(String(message || "").trim());
+
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
@@ -230,6 +246,14 @@
         const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
         const speedLabel = isPausedStatus(job.status) ? "Paused" : (isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps));
         const etaLabel = isPausedStatus(job.status) ? "Paused" : (isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds));
+        const progressLabel = formatPercentLabel(percent);
+        const statusLabel = isActiveStatus(job.status) && progressLabel
+            ? `Transferring ${progressLabel}`
+            : job.status_label;
+        const lastMessage = String(job.transfer.last_message || "");
+        const visibleMessage = isTransferDebugMessage(lastMessage)
+            ? ""
+            : (lastMessage || "Waiting for worker output.");
 
         const openDestination = job.explorer_root
             ? `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.explorer_root)}&path=${encodeURIComponent(job.explorer_path || "")}">Open Destination</a>`
@@ -266,7 +290,7 @@
                         <strong>${escapeHtml(job.display_name)}</strong>
                         <p class="job-url">${escapeHtml(job.url)}</p>
                     </div>
-                    <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status_label)}</span>
+                    <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(statusLabel)}</span>
                 </div>
                 <div class="metric-row">
                     <span>${escapeHtml(job.destination_display)}</span>
@@ -276,9 +300,11 @@
                     <span>${escapeHtml(etaLabel)}</span>
                 </div>
                 ${progressBar}
-                <div class="metric-row">
-                    <span>${escapeHtml(job.transfer.last_message || "Waiting for worker output.")}</span>
-                </div>
+                ${visibleMessage ? `
+                    <div class="metric-row">
+                        <span>${escapeHtml(visibleMessage)}</span>
+                    </div>
+                ` : ""}
                 ${job.error ? `<div class="flash flash-error">${escapeHtml(job.error)}</div>` : ""}
                 <div class="job-actions">${actions}</div>
             </article>
