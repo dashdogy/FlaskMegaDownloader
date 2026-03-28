@@ -15,6 +15,9 @@ POLL_INTERVAL_MS = int(os.environ.get("MEGA_DOWNLOADER_POLL_INTERVAL_MS", "1500"
 JOB_STORAGE_FILE = DATA_DIR / "jobs.json"
 MEGACMD_BINARY = os.environ.get("MEGACMD_BINARY", "mega-get")
 DOWNLOADER_BACKEND = os.environ.get("MEGA_DOWNLOADER_BACKEND", "auto")
+MAKEMKVCON_BINARY = os.environ.get("MAKEMKVCON_BINARY", "makemkvcon")
+MEDIAINFO_BINARY = os.environ.get("MEDIAINFO_BINARY", "mediainfo")
+BLURAY_MIN_TITLE_SECONDS = int(os.environ.get("MEGA_DOWNLOADER_BLURAY_MIN_TITLE_SECONDS", "2400"))
 
 ALLOWED_DESTINATIONS = {
     "downloads": {

@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterable
 
-from models import FavoriteDestination, Job, MoveFavorite
+from models import FavoriteDestination, Job, MediaJob, MoveFavorite
 
 
 class JsonStorage:
@@ -66,12 +66,17 @@ class JsonStorage:
         raw = self._load_payload()
         return [MoveFavorite.from_dict(item) for item in raw.get("move_favorites", [])]
 
+    def load_media_jobs(self) -> list[MediaJob]:
+        raw = self._load_payload()
+        return [MediaJob.from_dict(item) for item in raw.get("media_jobs", [])]
+
     def save_state(
         self,
         jobs: Iterable[Job],
         favorites: Iterable[FavoriteDestination],
         hidden_base_destinations: Iterable[str],
         move_favorites: Iterable[MoveFavorite] | None = None,
+        media_jobs: Iterable[MediaJob] | None = None,
     ) -> None:
         with self._lock:
             existing = self._load_payload_unlocked()
@@ -84,6 +89,11 @@ class JsonStorage:
                     if move_favorites is not None
                     else list(existing.get("move_favorites", []))
                 ),
+                "media_jobs": (
+                    [job.to_dict() for job in media_jobs]
+                    if media_jobs is not None
+                    else list(existing.get("media_jobs", []))
+                ),
             }
             self._write_payload_unlocked(payload)
 
@@ -95,6 +105,7 @@ class JsonStorage:
                 "favorites": list(existing.get("favorites", [])),
                 "hidden_base_destinations": list(existing.get("hidden_base_destinations", [])),
                 "move_favorites": [favorite.to_dict() for favorite in move_favorites],
+                "media_jobs": list(existing.get("media_jobs", [])),
             }
             self._write_payload_unlocked(payload)
 
@@ -106,5 +117,18 @@ class JsonStorage:
                 "favorites": list(existing.get("favorites", [])),
                 "hidden_base_destinations": list(existing.get("hidden_base_destinations", [])),
                 "move_favorites": list(existing.get("move_favorites", [])),
+                "media_jobs": list(existing.get("media_jobs", [])),
+            }
+            self._write_payload_unlocked(payload)
+
+    def save_media_jobs(self, media_jobs: Iterable[MediaJob]) -> None:
+        with self._lock:
+            existing = self._load_payload_unlocked()
+            payload = {
+                "jobs": list(existing.get("jobs", [])),
+                "favorites": list(existing.get("favorites", [])),
+                "hidden_base_destinations": list(existing.get("hidden_base_destinations", [])),
+                "move_favorites": list(existing.get("move_favorites", [])),
+                "media_jobs": [job.to_dict() for job in media_jobs],
             }
             self._write_payload_unlocked(payload)

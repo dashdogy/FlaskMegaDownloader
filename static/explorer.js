@@ -10,13 +10,17 @@
     const selectionButtons = Array.from(bulkForm.querySelectorAll("[data-selection-action]"));
     const moveButton = bulkForm.querySelector("[data-move-action]");
     const saveTargetButton = bulkForm.querySelector("[data-save-target]");
+    const compileButton = bulkForm.querySelector("[data-compile-action]");
+    const saveDestinationButton = bulkForm.querySelector("[data-save-destination]");
     const moveTargetInput = document.getElementById("move-target-path");
     const savedMoveTargetSelect = document.getElementById("saved-move-target");
+    const compileDestinationInput = document.getElementById("compile-destination-path");
 
     const updateSelectionUi = () => {
         const selectedCount = entryCheckboxes.filter((checkbox) => checkbox.checked).length;
         const totalCount = entryCheckboxes.length;
         const hasMoveTarget = Boolean(moveTargetInput?.value.trim());
+        const hasDestinationPath = Boolean(compileDestinationInput?.value.trim());
 
         if (selectionCount) {
             selectionCount.textContent = `${selectedCount} selected`;
@@ -32,6 +36,15 @@
 
         if (saveTargetButton) {
             saveTargetButton.disabled = !hasMoveTarget;
+        }
+
+        if (saveDestinationButton) {
+            saveDestinationButton.disabled = !hasDestinationPath;
+        }
+
+        if (compileButton) {
+            const compileLocked = compileButton.dataset.locked === "true";
+            compileButton.disabled = compileLocked || selectedCount === 0;
         }
 
         if (!selectAll) {
@@ -60,6 +73,10 @@
         moveTargetInput.addEventListener("input", updateSelectionUi);
     }
 
+    if (compileDestinationInput) {
+        compileDestinationInput.addEventListener("input", updateSelectionUi);
+    }
+
     if (savedMoveTargetSelect && moveTargetInput) {
         savedMoveTargetSelect.addEventListener("change", () => {
             const selectedValue = savedMoveTargetSelect.value;
@@ -68,6 +85,10 @@
             }
             updateSelectionUi();
         });
+    }
+
+    if (compileButton && compileButton.disabled) {
+        compileButton.dataset.locked = "true";
     }
 
     updateSelectionUi();

@@ -290,6 +290,11 @@ button:disabled {
     align-items: center;
 }
 
+.compact-callout {
+    margin: 0;
+    padding: 12px 14px;
+}
+
 .backend-note {
     margin: 10px 2px 0;
 }
@@ -424,7 +429,10 @@ button:disabled {
 .status-pill.active,
 .status-pill.downloading,
 .status-pill.probing,
-.status-pill.starting {
+.status-pill.starting,
+.status-pill.scanning,
+.status-pill.compiling,
+.status-pill.verifying {
     background: rgba(67, 115, 157, 0.12);
     color: var(--accent-strong);
 }
@@ -518,6 +526,14 @@ button:disabled {
     margin: 0;
 }
 
+.media-job-list {
+    margin-top: 16px;
+}
+
+.media-verification-row {
+    gap: 8px;
+}
+
 .danger-button {
     background: linear-gradient(135deg, #cf7a83 0%, var(--danger) 100%);
     color: white;
@@ -583,6 +599,7 @@ button:disabled {
 .move-confirmation-list,
 .move-confirmation-form,
 .explorer-bulk-meta,
+.explorer-compile-controls,
 .explorer-move-controls,
 .explorer-bulk-actions {
     display: flex;
@@ -612,10 +629,12 @@ button:disabled {
 }
 
 .explorer-move-controls,
+.explorer-compile-controls,
 .explorer-bulk-actions {
     align-items: stretch;
 }
 
+.explorer-compile-controls button,
 .explorer-move-controls button,
 .explorer-bulk-actions button {
     white-space: nowrap;
@@ -725,6 +744,7 @@ button:disabled {
 
     .move-confirmation-form > *,
     .explorer-bulk-meta > *,
+    .explorer-compile-controls > *,
     .explorer-move-controls > *,
     .explorer-bulk-actions > * {
         width: 100%;
@@ -752,6 +772,7 @@ button:disabled {
     }
 
     .rename-form input,
+    .explorer-compile-controls button,
     .explorer-move-controls button,
     .explorer-bulk-actions button,
     .unzip-form button,

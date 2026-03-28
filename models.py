@@ -18,6 +18,19 @@ JOB_STATUSES = {
 ACTIVE_JOB_STATUSES = {"starting", "probing", "downloading"}
 RETRYABLE_JOB_STATUSES = {"completed", "failed", "canceled"}
 
+MEDIA_JOB_STATUSES = {
+    "queued",
+    "scanning",
+    "compiling",
+    "verifying",
+    "completed",
+    "failed",
+    "canceled",
+}
+
+ACTIVE_MEDIA_JOB_STATUSES = {"scanning", "compiling", "verifying"}
+RETRYABLE_MEDIA_JOB_STATUSES = {"failed", "canceled"}
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -155,4 +168,99 @@ class MoveFavorite:
             key=data["key"],
             label=data["label"],
             path=data["path"],
+        )
+
+
+@dataclass(slots=True)
+class MediaVerification:
+    dolby_vision: bool = False
+    dolby_atmos: bool = False
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    verified_at: str | None = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "MediaVerification":
+        payload = data or {}
+        return cls(
+            dolby_vision=bool(payload.get("dolby_vision", False)),
+            dolby_atmos=bool(payload.get("dolby_atmos", False)),
+            video_codec=payload.get("video_codec"),
+            audio_codec=payload.get("audio_codec"),
+            verified_at=payload.get("verified_at"),
+        )
+
+
+@dataclass(slots=True)
+class MediaJob:
+    id: str
+    batch_id: str
+    source_root_key: str
+    source_relative_path: str
+    source_path: str
+    source_display_name: str
+    output_destination_key: str
+    output_destination_path: str
+    output_destination_relative_path: str = ""
+    output_destination_is_custom: bool = False
+    output_file_path: str | None = None
+    mkv_filename: str | None = None
+    title_id: int | None = None
+    title_name: str | None = None
+    title_duration_seconds: int | None = None
+    title_size_bytes: int | None = None
+    status: str = "queued"
+    created_at: str = field(default_factory=utcnow_iso)
+    updated_at: str = field(default_factory=utcnow_iso)
+    error: str | None = None
+    transfer: TransferStatus = field(default_factory=TransferStatus)
+    verification: MediaVerification = field(default_factory=MediaVerification)
+    output_tail: list[str] = field(default_factory=list)
+
+    def append_output(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        self.output_tail.append(line)
+        self.output_tail = self.output_tail[-18:]
+        self.transfer.last_message = line
+
+    def touch(self) -> None:
+        self.updated_at = utcnow_iso()
+
+    def to_dict(self) -> dict:
+        payload = asdict(self)
+        payload["transfer"] = self.transfer.to_dict()
+        payload["verification"] = self.verification.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MediaJob":
+        return cls(
+            id=data["id"],
+            batch_id=data["batch_id"],
+            source_root_key=data["source_root_key"],
+            source_relative_path=data["source_relative_path"],
+            source_path=data["source_path"],
+            source_display_name=data.get("source_display_name") or data["source_path"],
+            output_destination_key=data["output_destination_key"],
+            output_destination_path=data["output_destination_path"],
+            output_destination_relative_path=data.get("output_destination_relative_path", ""),
+            output_destination_is_custom=bool(data.get("output_destination_is_custom", False)),
+            output_file_path=data.get("output_file_path"),
+            mkv_filename=data.get("mkv_filename"),
+            title_id=data.get("title_id"),
+            title_name=data.get("title_name"),
+            title_duration_seconds=data.get("title_duration_seconds"),
+            title_size_bytes=data.get("title_size_bytes"),
+            status=data.get("status", "queued"),
+            created_at=data.get("created_at", utcnow_iso()),
+            updated_at=data.get("updated_at", utcnow_iso()),
+            error=data.get("error"),
+            transfer=TransferStatus.from_dict(data.get("transfer")),
+            verification=MediaVerification.from_dict(data.get("verification")),
+            output_tail=list(data.get("output_tail", [])),
         )

@@ -135,6 +135,85 @@ install_megacmd() {
   apt-get install -y megacmd
 }
 
+discover_makemkv_version() {
+  curl -fsSL https://www.makemkv.com/download/ \
+    | grep -oE 'MakeMKV v?[0-9]+\.[0-9]+\.[0-9]+' \
+    | head -n 1 \
+    | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+install_bluray_dependencies() {
+  local makemkv_version workdir jobs
+
+  export DEBIAN_FRONTEND=noninteractive
+  log "Installing Blu-ray remux dependencies."
+  apt-get install -y mediainfo build-essential pkg-config libc6-dev libssl-dev libexpat1-dev libavcodec-dev libgl1-mesa-dev qtbase5-dev zlib1g-dev
+
+  if command -v makemkvcon >/dev/null 2>&1; then
+    log "MakeMKV CLI is already available."
+    return
+  fi
+
+  makemkv_version="$(discover_makemkv_version || true)"
+  if [[ -z "${makemkv_version}" ]]; then
+    warn "Could not detect the latest MakeMKV version from makemkv.com. Blu-ray remuxing will stay unavailable until makemkvcon is installed."
+    return
+  fi
+
+  workdir="$(mktemp -d)"
+  jobs="$(nproc 2>/dev/null || echo 1)"
+  log "Building MakeMKV CLI ${makemkv_version} from the official source tarballs."
+
+  if ! (
+    cd "${workdir}" && \
+    curl -fsSL -O "https://www.makemkv.com/download/makemkv-oss-${makemkv_version}.tar.gz" && \
+    curl -fsSL -O "https://www.makemkv.com/download/makemkv-bin-${makemkv_version}.tar.gz" && \
+    tar -xzf "makemkv-oss-${makemkv_version}.tar.gz" && \
+    tar -xzf "makemkv-bin-${makemkv_version}.tar.gz" && \
+    cd "makemkv-oss-${makemkv_version}" && \
+    ./configure --prefix=/usr --disable-gui && \
+    make -j"${jobs}" && \
+    make install && \
+    cd "${workdir}/makemkv-bin-${makemkv_version}" && \
+    mkdir -p tmp && \
+    printf 'accepted\n' > tmp/eula_accepted && \
+    make -j"${jobs}" && \
+    make install
+  ); then
+    warn "Automatic MakeMKV build failed. The app will still install, but Blu-ray remuxing will remain unavailable until makemkvcon is installed manually."
+    rm -rf "${workdir}"
+    return
+  fi
+
+  rm -rf "${workdir}"
+  ldconfig || true
+
+  if command -v makemkvcon >/dev/null 2>&1; then
+    log "MakeMKV CLI installed successfully."
+    warn "If Blu-ray remux jobs later fail with beta key or registration errors, activate MakeMKV manually and rerun the helper."
+    return
+  fi
+
+  warn "MakeMKV build completed but makemkvcon is still not callable. Blu-ray remuxing will remain unavailable until MakeMKV is fixed manually."
+}
+
+verify_bluray_runtime() {
+  if ! command -v mediainfo >/dev/null 2>&1; then
+    warn "mediainfo is not available on PATH. Blu-ray remux verification will be unavailable."
+  fi
+
+  if ! command -v makemkvcon >/dev/null 2>&1; then
+    warn "makemkvcon is not available on PATH. Blu-ray remuxing will remain unavailable until MakeMKV is installed."
+    return
+  fi
+
+  if runuser -u "${RUNTIME_USER}" -- env HOME="${RUNTIME_HOME}" makemkvcon --help >/dev/null 2>&1; then
+    log "Verified makemkvcon is callable for ${RUNTIME_USER}."
+  else
+    warn "makemkvcon is installed but not callable for ${RUNTIME_USER}. Check permissions or library dependencies before using Blu-ray remuxing."
+  fi
+}
+
 verify_repo_matches() {
   local origin_url
   origin_url="$(git -C "${APP_DIR}" remote get-url origin 2>/dev/null || true)"
@@ -395,12 +474,14 @@ main() {
   normalize_mega_apt_sources
   apt_install_base
   install_megacmd
+  install_bluray_dependencies
   prepare_checkout
   setup_runtime_dirs
   setup_python_env
   write_default_config
   configure_service
   prompt_mega_login
+  verify_bluray_runtime
   print_summary
 }
 

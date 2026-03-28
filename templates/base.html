@@ -12,11 +12,11 @@
         <div>
             <p class="eyebrow">LAN Downloader</p>
             <h1>{{ app_title }}</h1>
-            <p class="subtle">Soft-card dashboard for queued MEGA downloads and safe local extraction.</p>
+            <p class="subtle">Soft-card dashboard for queued MEGA downloads, Blu-ray remux jobs, and safe local extraction.</p>
         </div>
         <nav class="site-nav">
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
-            <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer', 'explorer_move'] %}active{% endif %}">Explorer</a>
+            <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer', 'explorer_move', 'explorer_compile_bluray', 'explorer_delete', 'explorer_extract', 'explorer_rename'] %}active{% endif %}">Explorer</a>
         </nav>
     </header>
 

@@ -8,6 +8,10 @@
     const batchList = document.getElementById("batch-list");
     const backendLabel = document.getElementById("backend-label");
     const backendNote = document.getElementById("backend-note");
+    const mediaSummaryGrid = document.getElementById("media-summary-grid");
+    const mediaJobList = document.getElementById("media-job-list");
+    const mediaBackendLabel = document.getElementById("media-backend-label");
+    const mediaBackendNote = document.getElementById("media-backend-note");
     const updatedLabel = document.getElementById("dashboard-updated");
     const bulkPauseToggleButton = document.getElementById("bulk-pause-toggle");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
@@ -150,6 +154,7 @@
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
+    const isMediaActiveStatus = (status) => status === "scanning" || status === "compiling" || status === "verifying";
 
     const progressPercent = (transfer) => {
         if (transfer?.bytes_total) {
@@ -239,6 +244,30 @@
             ["Active", summary.active_jobs],
             ["Completed", summary.completed_jobs],
             ["Download Speed", formatSpeed(summary.throughput_bps)],
+        ].map(([label, value]) => `
+            <div class="stat-tile">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+                <small class="subtle">${escapeHtml(totalLabel)}</small>
+            </div>
+        `).join("");
+    };
+
+    const renderMediaSummary = (summary) => {
+        if (!mediaSummaryGrid) {
+            return;
+        }
+        const totalLabel = summary.has_unknown_total
+            ? `${formatBytes(summary.bytes_done)} / ${formatPartialTotal(summary.bytes_total)}`
+            : `${formatBytes(summary.bytes_done)} / ${formatBytes(summary.bytes_total)}`;
+
+        mediaSummaryGrid.innerHTML = [
+            ["Total Jobs", summary.total_jobs],
+            ["Queued", summary.queued_jobs],
+            ["Active", summary.active_jobs],
+            ["Completed", summary.completed_jobs],
+            ["Failed", summary.failed_jobs],
+            ["Remux Speed", formatSpeed(summary.throughput_bps)],
         ].map(([label, value]) => `
             <div class="stat-tile">
                 <span>${escapeHtml(label)}</span>
@@ -349,12 +378,91 @@
         `;
     };
 
+    const renderVerificationBadges = (verification) => {
+        const badges = [];
+        if (verification?.dolby_vision) {
+            badges.push('<span class="status-pill completed">Dolby Vision</span>');
+        }
+        if (verification?.dolby_atmos) {
+            badges.push('<span class="status-pill completed">Dolby Atmos</span>');
+        }
+        if (verification?.video_codec) {
+            badges.push(`<span class="status-pill">${escapeHtml(verification.video_codec)}</span>`);
+        }
+        if (verification?.audio_codec) {
+            badges.push(`<span class="status-pill">${escapeHtml(verification.audio_codec)}</span>`);
+        }
+        return badges.join("");
+    };
+
+    const renderMediaJob = (job) => {
+        const percent = progressPercent(job.transfer);
+        const progressBar = buildProgressBar(job.status, percent, isMediaActiveStatus(job.status) && percent === null);
+        const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
+        const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
+        const titleLabel = job.title_id === null || job.title_id === undefined
+            ? "Auto-select pending"
+            : `Title ${job.title_id}${job.title_name ? ` - ${job.title_name}` : ""}`;
+        const outputLabel = job.output_file_path || job.output_destination_display;
+        const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";
+
+        const actions = [
+            job.can_cancel ? `
+                <form action="/media-jobs/${encodeURIComponent(job.id)}/cancel" method="post">
+                    <button type="submit">Cancel</button>
+                </form>
+            ` : "",
+            job.can_retry ? `
+                <form action="/media-jobs/${encodeURIComponent(job.id)}/retry" method="post">
+                    <button type="submit">Retry</button>
+                </form>
+            ` : "",
+        ].join("");
+
+        return `
+            <article class="job-card media-job-card">
+                <div class="job-header">
+                    <div>
+                        <strong>${escapeHtml(job.source_display_name)}</strong>
+                        <p class="job-url">${escapeHtml(job.source_display)}</p>
+                    </div>
+                    <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status_label)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(titleLabel)}</span>
+                    <span>${escapeHtml(outputLabel)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(formatBytes(job.transfer.bytes_done))}</span>
+                    <span>${escapeHtml(job.transfer.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>
+                    <span>${escapeHtml(speedLabel)}</span>
+                    <span>${escapeHtml(etaLabel)}</span>
+                </div>
+                ${progressBar}
+                <div class="metric-row media-verification-row">
+                    ${renderVerificationBadges(job.verification) || '<span class="subtle">Verification pending</span>'}
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(visibleMessage)}</span>
+                </div>
+                ${job.error ? `<div class="flash flash-error">${escapeHtml(job.error)}</div>` : ""}
+                <div class="job-actions">${actions}</div>
+            </article>
+        `;
+    };
+
     const renderDashboard = (payload) => {
         if (backendLabel) {
             backendLabel.textContent = payload.backend.label;
         }
         if (backendNote) {
             backendNote.textContent = payload.backend.reason || "";
+        }
+        if (mediaBackendLabel && payload.media?.backend) {
+            mediaBackendLabel.textContent = payload.media.backend.label;
+        }
+        if (mediaBackendNote && payload.media?.backend) {
+            mediaBackendNote.textContent = payload.media.backend.reason || "";
         }
         if (updatedLabel) {
             updatedLabel.textContent = `Updated ${formatTimestamp(payload.updated_at)}`;
@@ -365,6 +473,12 @@
         }
 
         renderSummary(payload.summary);
+        renderMediaSummary(payload.media.summary);
+        if (mediaJobList) {
+            mediaJobList.innerHTML = payload.media.jobs.length
+                ? payload.media.jobs.map(renderMediaJob).join("")
+                : '<div class="stat-tile"><span>No Blu-ray jobs yet</span><strong>Queue is empty</strong><small class="subtle">Use the explorer to queue Blu-ray remux jobs.</small></div>';
+        }
         batchList.innerHTML = payload.batches.length
             ? payload.batches.map(renderBatch).join("")
             : '<div class="stat-tile"><span>No jobs yet</span><strong>Queue is empty</strong><small class="subtle">Submit one or more MEGA URLs to begin.</small></div>';

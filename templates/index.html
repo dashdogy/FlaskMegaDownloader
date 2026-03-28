@@ -99,6 +99,26 @@ https://mega.nz/folder/..."></textarea>
 <section class="card section-card">
     <div class="section-heading">
         <div>
+            <p class="eyebrow">Blu-ray Remux</p>
+            <h2>Compile jobs</h2>
+        </div>
+        <div class="section-actions">
+            <div class="backend-callout compact-callout">
+                <span>Blu-ray backend</span>
+                <strong id="media-backend-label">{{ dashboard.media.backend.label }}</strong>
+            </div>
+        </div>
+    </div>
+    <p class="subtle backend-note" id="media-backend-note">
+        {% if dashboard.media.backend.reason %}{{ dashboard.media.backend.reason }}{% endif %}
+    </p>
+    <div id="media-summary-grid" class="stat-grid"></div>
+    <div id="media-job-list" class="job-list media-job-list"></div>
+</section>
+
+<section class="card section-card">
+    <div class="section-heading">
+        <div>
             <p class="eyebrow">Batches</p>
             <h2>Queued jobs</h2>
         </div>

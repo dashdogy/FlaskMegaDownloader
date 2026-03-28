@@ -23,6 +23,7 @@ from explorer import (
     resolve_move_target,
     validate_entry_name,
 )
+from media_compiler import MediaCompileManager, detect_bluray_source
 from models import MoveFavorite
 from storage import JsonStorage
 
@@ -105,11 +106,37 @@ def create_app() -> Flask:
         megacmd_binary=app.config["MEGACMD_BINARY"],
         backend=app.config["DOWNLOADER_BACKEND"],
     )
+    media_manager = MediaCompileManager(
+        storage=storage,
+        makemkvcon_binary=app.config["MAKEMKVCON_BINARY"],
+        mediainfo_binary=app.config["MEDIAINFO_BINARY"],
+        bluray_min_title_seconds=app.config["BLURAY_MIN_TITLE_SECONDS"],
+    )
     app.extensions["download_manager"] = manager
+    app.extensions["media_compile_manager"] = media_manager
     atexit.register(manager.stop)
+    atexit.register(media_manager.stop)
 
     def explorer_redirect(root_key: str, current_path: str, sort_by: str):
         return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
+
+    def post_context_redirect(fallback_endpoint: str = "dashboard"):
+        root_key = request.form.get("root")
+        if root_key:
+            return explorer_redirect(
+                root_key,
+                request.form.get("current_path", ""),
+                request.form.get("sort", "name"),
+            )
+        return redirect(request.referrer or url_for(fallback_endpoint))
+
+    def destination_label_lookup() -> dict[str, str]:
+        return {item["key"]: item["label"] for item in manager.destination_options()}
+
+    def dashboard_payload() -> dict:
+        payload = manager.dashboard_payload()
+        payload["media"] = media_manager.dashboard_payload(destination_label_lookup())
+        return payload
 
     def move_favorite_options() -> list[dict]:
         favorites = storage.load_move_favorites()
@@ -171,6 +198,7 @@ def create_app() -> Flask:
             explorer=payload,
             move_favorites=move_favorite_options(),
             move_confirmation=move_confirmation,
+            media_backend=media_manager.backend_payload(),
         )
 
     def extract_archives_in_folder(
@@ -243,7 +271,7 @@ def create_app() -> Flask:
 
     @app.get("/")
     def dashboard():
-        return render_template("index.html", dashboard=manager.dashboard_payload())
+        return render_template("index.html", dashboard=dashboard_payload())
 
     @app.post("/submit")
     def submit():
@@ -269,19 +297,19 @@ def create_app() -> Flask:
         destination_input = normalize_destination_path_input(request.form.get("destination_path", ""))
         if not destination_input:
             flash("Enter a custom destination path before adding it to favorites.", "error")
-            return redirect(url_for("dashboard"))
+            return post_context_redirect()
 
         try:
             favorite = manager.add_favorite_destination(destination_key, destination_input)
         except ValueError as exc:
             flash(str(exc), "error")
-            return redirect(url_for("dashboard"))
+            return post_context_redirect()
 
         if favorite["created"]:
             flash(f"Added favorite destination: {favorite['path']}", "success")
         else:
             flash(f"Destination already exists in the dropdown: {favorite['path']}", "success")
-        return redirect(url_for("dashboard"))
+        return post_context_redirect()
 
     @app.post("/destinations/<destination_key>/delete")
     def delete_destination(destination_key: str):
@@ -303,7 +331,7 @@ def create_app() -> Flask:
 
     @app.get("/api/jobs")
     def api_jobs():
-        return jsonify(manager.dashboard_payload())
+        return jsonify(dashboard_payload())
 
     @app.post("/jobs/<job_id>/cancel")
     def cancel_job(job_id: str):
@@ -319,6 +347,24 @@ def create_app() -> Flask:
         try:
             manager.retry_job(job_id)
             flash("Job re-queued.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/media-jobs/<job_id>/cancel")
+    def cancel_media_job(job_id: str):
+        try:
+            media_manager.cancel_job(job_id)
+            flash("Blu-ray cancel request sent.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(request.referrer or url_for("dashboard"))
+
+    @app.post("/media-jobs/<job_id>/retry")
+    def retry_media_job(job_id: str):
+        try:
+            media_manager.retry_job(job_id)
+            flash("Blu-ray job re-queued.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
         return redirect(request.referrer or url_for("dashboard"))
@@ -580,6 +626,75 @@ def create_app() -> Flask:
             )
         if not result["moved"] and not result["replaced"] and not result["failures"]:
             flash("No items were moved.", "error")
+        return explorer_redirect(root_key, current_path, sort_by)
+
+    @app.post("/explorer/compile-bluray")
+    def explorer_compile_bluray():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        selected_paths = request.form.getlist("selected_paths")
+        destination_key = request.form.get("destination", "")
+        destination_subpath = normalize_destination_path_input(request.form.get("destination_path", ""))
+
+        backend = media_manager.backend_payload()
+        if not backend["available"]:
+            flash(backend["reason"] or "Blu-ray remux backend is unavailable.", "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        try:
+            _, _, resolved_entries = resolve_entries_in_directory(
+                manager.destinations,
+                root_key,
+                current_path,
+                selected_paths,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        try:
+            output_destination_path, output_destination_relative_path, output_destination_is_custom = manager.resolve_destination(
+                destination_key,
+                destination_subpath,
+            )
+            ensure_destination_writable(output_destination_path)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        valid_sources = []
+        skipped: list[str] = []
+        for relative_path, entry_path in resolved_entries:
+            source = detect_bluray_source(entry_path, relative_path)
+            if source is None:
+                skipped.append(entry_path.name)
+                continue
+            valid_sources.append(source)
+
+        if not valid_sources:
+            flash("Select one or more Blu-ray folders that contain BDMV/index.bdmv.", "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        try:
+            jobs = media_manager.submit(
+                valid_sources,
+                source_root_key=root_key,
+                output_destination_key=destination_key,
+                output_destination_path=output_destination_path,
+                output_destination_relative_path=output_destination_relative_path,
+                output_destination_is_custom=output_destination_is_custom,
+            )
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        flash(f"Queued {len(jobs)} Blu-ray remux job(s).", "success")
+        if skipped:
+            flash(
+                f"Skipped {len(skipped)} item(s) that are not valid Blu-ray folders: {summarize_items(skipped)}.",
+                "success",
+            )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/unzip")
