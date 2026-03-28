@@ -15,6 +15,7 @@ from explorer import (
     delete_entries,
     list_directory,
     move_entries,
+    normalize_user_path_input,
     path_within_root,
     preview_move_entries,
     rename_entry,
@@ -63,16 +64,11 @@ def parse_urls(raw_text: str) -> list[str]:
 
 
 def normalize_destination_path_input(raw_text: str) -> str:
-    cleaned = (raw_text or "").strip().replace("\\", "/")
-    if not cleaned or cleaned == ".":
-        return ""
-    while cleaned.startswith("./"):
-        cleaned = cleaned[2:]
-    return cleaned
+    return normalize_user_path_input(raw_text)
 
 
 def normalize_move_target_input(raw_text: str) -> str:
-    return (raw_text or "").strip()
+    return normalize_user_path_input(raw_text)
 
 
 def summarize_items(items: list[str], limit: int = 3) -> str:

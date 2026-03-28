@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pyzipper
 
-from explorer import normalize_destinations, path_within_root, relative_to_root
+from explorer import normalize_destinations, normalize_user_path_input, path_within_root, relative_to_root, resolve_absolute_input_path
 from models import ACTIVE_JOB_STATUSES, FavoriteDestination, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
@@ -1030,9 +1030,9 @@ class DownloadManager:
 
     def resolve_destination(self, destination_key: str, destination_subpath: str = "") -> tuple[Path, str, bool]:
         root = self.get_destination_path(destination_key)
-        normalized_subpath = (destination_subpath or "").strip()
+        normalized_subpath = normalize_user_path_input(destination_subpath)
         if looks_like_absolute_path(normalized_subpath):
-            resolved_path = Path(normalized_subpath).expanduser().resolve()
+            resolved_path = resolve_absolute_input_path(normalized_subpath)
             return resolved_path, "", True
 
         normalized_subpath = normalized_subpath.replace("\\", "/")

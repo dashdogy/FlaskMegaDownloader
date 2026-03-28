@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,10 +56,32 @@ def normalize_relative_path(value: str | Path) -> str:
     return text
 
 
+def normalize_user_path_input(raw_text: str | Path) -> str:
+    cleaned = str(raw_text or "").strip()
+    if not cleaned or cleaned == ".":
+        return ""
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    if os.name != "nt":
+        if cleaned.startswith("\\"):
+            cleaned = "/" + cleaned.lstrip("\\/")
+        cleaned = cleaned.replace("\\", "/")
+    return cleaned
+
+
+def resolve_absolute_input_path(raw_path: str | Path) -> Path:
+    cleaned = normalize_user_path_input(raw_path)
+    if not cleaned:
+        raise ValueError("Path cannot be empty.")
+    if os.name != "nt" and PureWindowsPath(cleaned).drive:
+        raise ValueError("Windows drive-letter paths are not supported on this server.")
+    return Path(cleaned).expanduser().resolve()
+
+
 def looks_like_absolute_path(raw_path: str) -> bool:
     if not raw_path:
         return False
-    path = raw_path.strip()
+    path = normalize_user_path_input(raw_path)
     return path.startswith(("/", "\\")) or Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
@@ -182,12 +205,12 @@ def resolve_move_target(
     root_info = resolve_root(destinations, root_key)
     root = root_info["path"]
     current_dir = path_within_root(root, current_relative_path)
-    cleaned = (target_input or "").strip()
+    cleaned = normalize_user_path_input(target_input)
     if not cleaned:
         raise ValueError("Enter a move target path.")
 
     if looks_like_absolute_path(cleaned):
-        target_dir = Path(cleaned).expanduser().resolve()
+        target_dir = resolve_absolute_input_path(cleaned)
     else:
         target_dir = path_within_root(root, cleaned.replace("\\", "/"))
 
