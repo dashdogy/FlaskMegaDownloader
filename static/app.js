@@ -231,7 +231,7 @@
             ["Paused", summary.paused_jobs],
             ["Active", summary.active_jobs],
             ["Completed", summary.completed_jobs],
-            ["Throughput", formatSpeed(summary.throughput_bps)],
+            ["Download Speed", formatSpeed(summary.throughput_bps)],
         ].map(([label, value]) => `
             <div class="stat-tile">
                 <span>${escapeHtml(label)}</span>

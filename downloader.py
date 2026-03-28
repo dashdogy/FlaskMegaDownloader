@@ -867,6 +867,7 @@ class DownloadManager:
         self._pause_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int, float | None]] = {}
+        self._summary_throughput_sample: tuple[float, tuple[str, ...], int] | None = None
         self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
@@ -1428,6 +1429,8 @@ class DownloadManager:
         with self._lock:
             queued_job_ids = self._queued_job_ids_locked()
             queued_jobs = [self._jobs[job_id] for job_id in queued_job_ids if job_id in self._jobs]
+            live_jobs = [job for job in self._jobs.values() if job.status in ACTIVE_JOB_STATUSES]
+            summary_throughput_bps = self._summary_throughput_bps_locked(live_jobs)
             active_jobs = sorted(
                 [job for job in self._jobs.values() if job.status in {"paused", *ACTIVE_JOB_STATUSES}],
                 key=lambda item: item.updated_at,
@@ -1477,8 +1480,8 @@ class DownloadManager:
                 summary["has_unknown_total"] = True
             else:
                 summary["bytes_total"] += job["transfer"]["bytes_total"]
-            if job["transfer"]["speed_bps"] is not None:
-                summary["throughput_bps"] += job["transfer"]["speed_bps"]
+            if summary_throughput_bps is not None:
+                summary["throughput_bps"] = summary_throughput_bps
 
             batch = batches.setdefault(
                 job["batch_id"],
@@ -1524,6 +1527,34 @@ class DownloadManager:
             "bulk_pause_toggle": self.bulk_pause_toggle(),
             "updated_at": utcnow_iso(),
         }
+
+    def _summary_throughput_bps_locked(self, active_jobs: list[Job]) -> float | None:
+        if not active_jobs:
+            self._summary_throughput_sample = None
+            return None
+
+        now = time.monotonic()
+        active_job_ids = tuple(sorted(job.id for job in active_jobs))
+        total_bytes_done = sum(max(job.transfer.bytes_done, 0) for job in active_jobs)
+        fallback_speed = sum(job.transfer.speed_bps or 0.0 for job in active_jobs) or None
+        sample = self._summary_throughput_sample
+
+        if sample is None:
+            self._summary_throughput_sample = (now, active_job_ids, total_bytes_done)
+            return fallback_speed
+
+        sample_time, sample_job_ids, sample_bytes_done = sample
+        self._summary_throughput_sample = (now, active_job_ids, total_bytes_done)
+
+        if sample_job_ids != active_job_ids:
+            return fallback_speed
+
+        elapsed = now - sample_time
+        byte_delta = total_bytes_done - sample_bytes_done
+        if elapsed > 0 and byte_delta > 0:
+            return byte_delta / elapsed
+
+        return fallback_speed
 
     def _job_payload(self, job: Job, destination_lookup: dict[str, str]) -> dict:
         payload = job.to_dict()
