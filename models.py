@@ -138,3 +138,21 @@ class FavoriteDestination:
             path=data["path"],
             favorite=bool(data.get("favorite", True)),
         )
+
+
+@dataclass(slots=True)
+class MoveFavorite:
+    key: str
+    label: str
+    path: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MoveFavorite":
+        return cls(
+            key=data["key"],
+            label=data["label"],
+            path=data["path"],
+        )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PureWindowsPath
 
 from models import ExplorerEntry
 
@@ -52,6 +53,13 @@ def normalize_relative_path(value: str | Path) -> str:
     if text in {"", "."}:
         return ""
     return text
+
+
+def looks_like_absolute_path(raw_path: str) -> bool:
+    if not raw_path:
+        return False
+    path = raw_path.strip()
+    return path.startswith(("/", "\\")) or Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
 
 
 def validate_entry_name(name: str) -> str:
@@ -162,6 +170,116 @@ def rename_entry(
         "new_relative_path": relative_to_root(root_info["path"], target_path),
         "renamed": True,
         "name": validated_name,
+    }
+
+
+def resolve_move_target(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    target_input: str,
+) -> tuple[dict, Path, Path]:
+    root_info = resolve_root(destinations, root_key)
+    root = root_info["path"]
+    current_dir = path_within_root(root, current_relative_path)
+    cleaned = (target_input or "").strip()
+    if not cleaned:
+        raise ValueError("Enter a move target path.")
+
+    if looks_like_absolute_path(cleaned):
+        target_dir = Path(cleaned).expanduser().resolve()
+    else:
+        target_dir = path_within_root(root, cleaned.replace("\\", "/"))
+
+    return root_info, current_dir, target_dir
+
+
+def preview_move_entries(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    relative_paths: list[str] | tuple[str, ...],
+    target_input: str,
+) -> dict:
+    _, current_dir, resolved_entries = resolve_entries_in_directory(
+        destinations,
+        root_key,
+        current_relative_path,
+        relative_paths,
+    )
+    _, _, target_dir = resolve_move_target(destinations, root_key, current_relative_path, target_input)
+
+    if target_dir == current_dir:
+        raise ValueError("Move target cannot be the current explorer folder.")
+    if target_dir.exists() and not target_dir.is_dir():
+        raise ValueError(f"Move target '{target_dir}' exists but is not a directory.")
+
+    conflicts: list[str] = []
+    for _, entry_path in resolved_entries:
+        if entry_path.is_dir() and (target_dir == entry_path or entry_path in target_dir.parents):
+            raise ValueError(f"Cannot move folder '{entry_path.name}' into itself or one of its subfolders.")
+        if (target_dir / entry_path.name).exists():
+            conflicts.append(entry_path.name)
+
+    return {
+        "target_dir": target_dir,
+        "conflicts": conflicts,
+        "entries": resolved_entries,
+    }
+
+
+def _remove_existing_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+    path.unlink(missing_ok=True)
+
+
+def move_entries(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    relative_paths: list[str] | tuple[str, ...],
+    target_input: str,
+    *,
+    replace_existing: bool = False,
+) -> dict:
+    preview = preview_move_entries(destinations, root_key, current_relative_path, relative_paths, target_input)
+    target_dir: Path = preview["target_dir"]
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    moved: list[str] = []
+    replaced: list[str] = []
+    failures: list[str] = []
+
+    for _, entry_path in preview["entries"]:
+        target_path = target_dir / entry_path.name
+        replaced_existing = False
+        try:
+            if target_path.exists():
+                if not replace_existing:
+                    failures.append(f"{entry_path.name}: already exists in the target folder.")
+                    continue
+                _remove_existing_path(target_path)
+                replaced_existing = True
+
+            shutil.move(str(entry_path), str(target_path))
+            if replaced_existing:
+                replaced.append(entry_path.name)
+            else:
+                moved.append(entry_path.name)
+        except (OSError, shutil.Error) as exc:
+            failures.append(f"{entry_path.name}: {exc}")
+
+    return {
+        "moved": moved,
+        "replaced": replaced,
+        "failures": failures,
+        "target_dir": str(target_dir),
+        "conflicts": preview["conflicts"],
     }
 
 

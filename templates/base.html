@@ -16,7 +16,7 @@
         </div>
         <nav class="site-nav">
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
-            <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer'] %}active{% endif %}">Explorer</a>
+            <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer', 'explorer_move'] %}active{% endif %}">Explorer</a>
         </nav>
     </header>
 

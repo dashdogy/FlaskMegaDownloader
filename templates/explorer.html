@@ -35,16 +35,65 @@
         {% endif %}
     </div>
 
+    {% if move_confirmation %}
+        <div class="move-confirmation">
+            <strong>Replace existing items before moving?</strong>
+            <p class="subtle">
+                Nothing has been moved yet. {{ move_confirmation.conflicts|length }} selected item(s) already exist in
+                <code>{{ move_confirmation.target_path }}</code>.
+            </p>
+            <div class="move-confirmation-list">
+                {% for name in move_confirmation.conflicts %}
+                    <span class="status-pill failed">{{ name }}</span>
+                {% endfor %}
+            </div>
+            <form action="{{ url_for('explorer_move') }}" method="post" class="move-confirmation-form">
+                <input type="hidden" name="root" value="{{ explorer.root.key }}">
+                <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
+                <input type="hidden" name="sort" value="{{ explorer.sort }}">
+                <input type="hidden" name="move_target" value="{{ move_confirmation.target_input }}">
+                <input type="hidden" name="replace_existing" value="1">
+                {% for path in move_confirmation.selected_paths %}
+                    <input type="hidden" name="selected_paths" value="{{ path }}">
+                {% endfor %}
+                <button type="submit" class="danger-button">Replace And Move</button>
+                <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort=explorer.sort) }}" class="ghost-button">Cancel</a>
+            </form>
+        </div>
+    {% endif %}
+
     <form action="{{ url_for('explorer_extract') }}" method="post" class="explorer-bulk-form" id="explorer-bulk-form">
         <input type="hidden" name="root" value="{{ explorer.root.key }}">
         <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
         <input type="hidden" name="sort" value="{{ explorer.sort }}">
 
         <div class="explorer-bulk-bar">
-            <span class="subtle" id="selection-count">0 selected</span>
-            <input type="password" name="password" placeholder="Shared zip password (optional)">
-            <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-bulk-action disabled>Extract Selected Zips</button>
-            <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-bulk-action disabled>Delete Selected</button>
+            <div class="explorer-bulk-meta">
+                <span class="subtle" id="selection-count">0 selected</span>
+            </div>
+            <div class="explorer-move-controls">
+                <select id="saved-move-target" aria-label="Saved move targets">
+                    <option value="">Saved move targets</option>
+                    {% for favorite in move_favorites %}
+                        <option value="{{ favorite.path }}">{{ favorite.label }} - {{ favorite.path }}</option>
+                    {% endfor %}
+                </select>
+                <input
+                    type="text"
+                    id="move-target-path"
+                    name="move_target"
+                    value="{{ move_confirmation.target_input if move_confirmation else '' }}"
+                    placeholder="Move target path"
+                    aria-label="Move target path"
+                >
+                <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
+                <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
+            </div>
+            <div class="explorer-bulk-actions">
+                <input type="password" name="password" placeholder="Shared zip password (optional)">
+                <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Zips</button>
+                <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-selection-action disabled>Delete Selected</button>
+            </div>
         </div>
 
         <div class="explorer-table-wrap">

@@ -564,20 +564,61 @@ button:disabled {
     gap: 16px;
 }
 
-.explorer-bulk-bar {
+.move-confirmation {
+    display: grid;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 18px 20px;
+    border-radius: 22px;
+    background: rgba(255, 243, 244, 0.94);
+    border: 1px solid rgba(175, 77, 87, 0.14);
+}
+
+.move-confirmation code {
+    padding: 2px 6px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.8);
+}
+
+.move-confirmation-list,
+.move-confirmation-form,
+.explorer-bulk-meta,
+.explorer-move-controls,
+.explorer-bulk-actions {
     display: flex;
     gap: 12px;
     align-items: center;
     flex-wrap: wrap;
+}
+
+.explorer-bulk-bar {
+    display: grid;
+    gap: 12px;
     padding: 14px 16px;
     border-radius: 20px;
     background: rgba(240, 246, 251, 0.92);
     border: 1px solid rgba(67, 115, 157, 0.08);
 }
 
-.explorer-bulk-bar input[type="password"] {
+.explorer-bulk-bar input[type="password"],
+.explorer-bulk-bar input[type="text"],
+.explorer-bulk-bar select {
     flex: 1 1 260px;
     min-width: 220px;
+}
+
+.explorer-bulk-meta {
+    justify-content: space-between;
+}
+
+.explorer-move-controls,
+.explorer-bulk-actions {
+    align-items: stretch;
+}
+
+.explorer-move-controls button,
+.explorer-bulk-actions button {
+    white-space: nowrap;
 }
 
 .selection-cell {
@@ -682,10 +723,14 @@ button:disabled {
         text-align: center;
     }
 
-    .explorer-bulk-bar > * {
+    .move-confirmation-form > *,
+    .explorer-bulk-meta > *,
+    .explorer-move-controls > *,
+    .explorer-bulk-actions > * {
         width: 100%;
     }
 
+    .move-confirmation-form button,
     .explorer-bulk-bar button {
         text-align: center;
     }
@@ -707,6 +752,8 @@ button:disabled {
     }
 
     .rename-form input,
+    .explorer-move-controls button,
+    .explorer-bulk-actions button,
     .unzip-form button,
     .rename-form button {
         width: 100%;

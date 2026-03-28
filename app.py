@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -9,15 +10,19 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, url
 
 import config as default_config
 from archives import ArchiveError, extract_archive
-from downloader import DownloadManager
+from downloader import DownloadManager, ensure_destination_writable
 from explorer import (
     delete_entries,
     list_directory,
+    move_entries,
     path_within_root,
+    preview_move_entries,
     rename_entry,
     resolve_entries_in_directory,
+    resolve_move_target,
     validate_entry_name,
 )
+from models import MoveFavorite
 from storage import JsonStorage
 
 
@@ -66,6 +71,10 @@ def normalize_destination_path_input(raw_text: str) -> str:
     return cleaned
 
 
+def normalize_move_target_input(raw_text: str) -> str:
+    return (raw_text or "").strip()
+
+
 def summarize_items(items: list[str], limit: int = 3) -> str:
     if not items:
         return ""
@@ -105,6 +114,68 @@ def create_app() -> Flask:
 
     def explorer_redirect(root_key: str, current_path: str, sort_by: str):
         return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
+
+    def move_favorite_options() -> list[dict]:
+        favorites = storage.load_move_favorites()
+        favorites.sort(key=lambda item: (item.label.lower(), item.path.lower()))
+        return [favorite.to_dict() for favorite in favorites]
+
+    def save_move_favorite(root_key: str, current_path: str, target_input: str) -> dict:
+        _, _, target_dir = resolve_move_target(manager.destinations, root_key, current_path, target_input)
+        ensure_destination_writable(target_dir)
+        resolved_path = str(target_dir)
+
+        favorites = storage.load_move_favorites()
+        for favorite in favorites:
+            if Path(favorite.path).expanduser().resolve() == target_dir:
+                return {
+                    "key": favorite.key,
+                    "label": favorite.label,
+                    "path": favorite.path,
+                    "created": False,
+                }
+
+        label = target_dir.name or resolved_path
+        favorite = MoveFavorite(
+            key=f"move_{hashlib.sha1(resolved_path.encode('utf-8')).hexdigest()[:10]}",
+            label=label,
+            path=resolved_path,
+        )
+        favorites.append(favorite)
+        favorites.sort(key=lambda item: (item.label.lower(), item.path.lower()))
+        storage.save_move_favorites(favorites)
+        return {
+            "key": favorite.key,
+            "label": favorite.label,
+            "path": favorite.path,
+            "created": True,
+        }
+
+    def render_explorer_page(
+        root_key: str,
+        current_path: str,
+        sort_by: str,
+        *,
+        move_confirmation: dict | None = None,
+    ):
+        destination_options = manager.destination_options()
+        if not destination_options:
+            flash("No destinations are configured. Restore or add one before opening the explorer.", "error")
+            return redirect(url_for("dashboard"))
+
+        try:
+            payload = list_directory(manager.destinations, root_key, current_path, sort_by)
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            fallback_root = destination_options[0]["key"]
+            return redirect(url_for("explorer", root=fallback_root))
+
+        return render_template(
+            "explorer.html",
+            explorer=payload,
+            move_favorites=move_favorite_options(),
+            move_confirmation=move_confirmation,
+        )
 
     def extract_archives_in_folder(
         root_key: str,
@@ -328,12 +399,7 @@ def create_app() -> Flask:
         requested_root = request.args.get("root") or destination_options[0]["key"]
         requested_path = request.args.get("path", "")
         sort_by = request.args.get("sort", "name")
-        try:
-            payload = list_directory(manager.destinations, requested_root, requested_path, sort_by)
-        except (ValueError, FileNotFoundError) as exc:
-            flash(str(exc), "error")
-            return redirect(url_for("explorer", root=destination_options[0]["key"]))
-        return render_template("explorer.html", explorer=payload)
+        return render_explorer_page(requested_root, requested_path, sort_by)
 
     @app.get("/api/explorer")
     def api_explorer():
@@ -429,6 +495,95 @@ def create_app() -> Flask:
             )
         if not result["extracted"] and not result["skipped"] and not result["failures"]:
             flash("No archives were extracted.", "error")
+        return explorer_redirect(root_key, current_path, sort_by)
+
+    @app.post("/explorer/move-favorites")
+    def explorer_move_favorites():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        move_target = normalize_move_target_input(request.form.get("move_target", ""))
+        if not move_target:
+            flash("Enter a move target path before saving it.", "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        try:
+            favorite = save_move_favorite(root_key, current_path, move_target)
+        except ValueError as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if favorite["created"]:
+            flash(f"Added move target favorite: {favorite['path']}", "success")
+        else:
+            flash(f"Move target already exists in saved targets: {favorite['path']}", "success")
+        return explorer_redirect(root_key, current_path, sort_by)
+
+    @app.post("/explorer/move")
+    def explorer_move():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        selected_paths = request.form.getlist("selected_paths")
+        move_target = normalize_move_target_input(request.form.get("move_target", ""))
+        replace_existing = request.form.get("replace_existing") == "1"
+
+        try:
+            preview = preview_move_entries(
+                manager.destinations,
+                root_key,
+                current_path,
+                selected_paths,
+                move_target,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if preview["conflicts"] and not replace_existing:
+            return render_explorer_page(
+                root_key,
+                current_path,
+                sort_by,
+                move_confirmation={
+                    "target_input": move_target,
+                    "target_path": str(preview["target_dir"]),
+                    "selected_paths": selected_paths,
+                    "conflicts": preview["conflicts"],
+                },
+            )
+
+        try:
+            ensure_destination_writable(preview["target_dir"])
+            result = move_entries(
+                manager.destinations,
+                root_key,
+                current_path,
+                selected_paths,
+                move_target,
+                replace_existing=replace_existing,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if result["moved"]:
+            flash(
+                f"Moved {len(result['moved'])} item(s) to {result['target_dir']}: {summarize_items(result['moved'])}.",
+                "success",
+            )
+        if result["replaced"]:
+            flash(
+                f"Replaced and moved {len(result['replaced'])} item(s): {summarize_items(result['replaced'])}.",
+                "success",
+            )
+        if result["failures"]:
+            flash(
+                f"Failed to move {len(result['failures'])} item(s): {summarize_items(result['failures'])}.",
+                "error",
+            )
+        if not result["moved"] and not result["replaced"] and not result["failures"]:
+            flash("No items were moved.", "error")
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/unzip")
