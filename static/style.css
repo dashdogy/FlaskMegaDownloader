@@ -559,6 +559,37 @@ button:disabled {
     margin-bottom: 14px;
 }
 
+.explorer-bulk-form {
+    display: grid;
+    gap: 16px;
+}
+
+.explorer-bulk-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 14px 16px;
+    border-radius: 20px;
+    background: rgba(240, 246, 251, 0.92);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.explorer-bulk-bar input[type="password"] {
+    flex: 1 1 260px;
+    min-width: 220px;
+}
+
+.selection-cell {
+    width: 52px;
+}
+
+.selection-cell input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+}
+
 .explorer-table-wrap {
     overflow-x: auto;
 }
@@ -595,6 +626,12 @@ button:disabled {
     letter-spacing: 0.08em;
 }
 
+.entry-action-stack {
+    display: grid;
+    gap: 10px;
+    min-width: min(100%, 420px);
+}
+
 .unzip-form {
     display: flex;
     gap: 10px;
@@ -602,7 +639,19 @@ button:disabled {
     align-items: center;
 }
 
+.rename-form {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
 .unzip-form input {
+    min-width: 180px;
+}
+
+.rename-form input {
+    flex: 1 1 200px;
     min-width: 180px;
 }
 
@@ -632,6 +681,14 @@ button:disabled {
         flex: 1;
         text-align: center;
     }
+
+    .explorer-bulk-bar > * {
+        width: 100%;
+    }
+
+    .explorer-bulk-bar button {
+        text-align: center;
+    }
 }
 
 @media (max-width: 680px) {
@@ -647,5 +704,11 @@ button:disabled {
 
     .unzip-form input {
         min-width: 100%;
+    }
+
+    .rename-form input,
+    .unzip-form button,
+    .rename-form button {
+        width: 100%;
     }
 }

@@ -10,7 +10,14 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, url
 import config as default_config
 from archives import ArchiveError, extract_archive
 from downloader import DownloadManager
-from explorer import list_directory, path_within_root
+from explorer import (
+    delete_entries,
+    list_directory,
+    path_within_root,
+    rename_entry,
+    resolve_entries_in_directory,
+    validate_entry_name,
+)
 from storage import JsonStorage
 
 
@@ -59,6 +66,15 @@ def normalize_destination_path_input(raw_text: str) -> str:
     return cleaned
 
 
+def summarize_items(items: list[str], limit: int = 3) -> str:
+    if not items:
+        return ""
+    if len(items) <= limit:
+        return ", ".join(items)
+    visible = ", ".join(items[:limit])
+    return f"{visible}, and {len(items) - limit} more"
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(default_config)
@@ -86,6 +102,65 @@ def create_app() -> Flask:
     )
     app.extensions["download_manager"] = manager
     atexit.register(manager.stop)
+
+    def explorer_redirect(root_key: str, current_path: str, sort_by: str):
+        return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
+
+    def extract_archives_in_folder(
+        root_key: str,
+        current_path: str,
+        relative_paths: list[str],
+        *,
+        password: str | None = None,
+        target_dir_name: str | None = None,
+        skip_non_zip: bool,
+    ) -> dict:
+        root_info, _, resolved_entries = resolve_entries_in_directory(
+            manager.destinations,
+            root_key,
+            current_path,
+            relative_paths,
+        )
+        root = root_info["path"]
+        extracted: list[dict] = []
+        skipped: list[str] = []
+        failures: list[str] = []
+
+        if target_dir_name:
+            target_dir_name = validate_entry_name(target_dir_name)
+
+        for relative_path, entry_path in resolved_entries:
+            if entry_path.suffix.lower() != ".zip" or not entry_path.is_file():
+                if skip_non_zip:
+                    skipped.append(Path(relative_path).name)
+                    continue
+                raise ArchiveError("Only zip files inside an allowed root can be extracted.")
+
+            if target_dir_name:
+                target_relative = str(Path(relative_path).parent / target_dir_name)
+            else:
+                target_relative = str(Path(relative_path).with_suffix(""))
+            target_dir = path_within_root(root, target_relative)
+
+            try:
+                extracted_files = extract_archive(entry_path, target_dir, password=password)
+            except ArchiveError as exc:
+                failures.append(f"{entry_path.name}: {exc}")
+                continue
+
+            extracted.append(
+                {
+                    "archive": entry_path.name,
+                    "target": target_dir.name,
+                    "count": len(extracted_files),
+                }
+            )
+
+        return {
+            "extracted": extracted,
+            "skipped": skipped,
+            "failures": failures,
+        }
 
     @app.context_processor
     def inject_globals():
@@ -274,34 +349,115 @@ def create_app() -> Flask:
             return jsonify({"error": str(exc)}), 400
         return jsonify(payload)
 
+    @app.post("/explorer/delete")
+    def explorer_delete():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        selected_paths = request.form.getlist("selected_paths")
+
+        try:
+            result = delete_entries(manager.destinations, root_key, current_path, selected_paths)
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if result["deleted"]:
+            flash(f"Deleted {len(result['deleted'])} item(s): {summarize_items([Path(item).name for item in result['deleted']])}.", "success")
+        if result["failures"]:
+            flash(
+                f"Failed to delete {len(result['failures'])} item(s): {summarize_items(result['failures'])}.",
+                "error",
+            )
+        if not result["deleted"] and not result["failures"]:
+            flash("No items were deleted.", "error")
+        return explorer_redirect(root_key, current_path, sort_by)
+
+    @app.post("/explorer/rename")
+    def explorer_rename():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        relative_path = request.form.get("entry_path", "")
+        new_name = request.form.get("new_name", "")
+
+        try:
+            result = rename_entry(manager.destinations, root_key, current_path, relative_path, new_name)
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if result["renamed"]:
+            flash(f"Renamed item to {result['name']}.", "success")
+        else:
+            flash(f"Name already matches {result['name']}.", "success")
+        return explorer_redirect(root_key, current_path, sort_by)
+
+    @app.post("/explorer/extract")
+    def explorer_extract():
+        root_key = request.form.get("root", "")
+        current_path = request.form.get("current_path", "")
+        sort_by = request.form.get("sort", "name")
+        selected_paths = request.form.getlist("selected_paths")
+        password = request.form.get("password") or None
+
+        try:
+            result = extract_archives_in_folder(
+                root_key,
+                current_path,
+                selected_paths,
+                password=password,
+                skip_non_zip=True,
+            )
+        except (ValueError, FileNotFoundError, ArchiveError) as exc:
+            flash(str(exc), "error")
+            return explorer_redirect(root_key, current_path, sort_by)
+
+        if result["extracted"]:
+            extracted_labels = [f"{item['archive']} -> {item['target']}" for item in result["extracted"]]
+            flash(
+                f"Extracted {len(result['extracted'])} archive(s): "
+                f"{summarize_items(extracted_labels)}.",
+                "success",
+            )
+        if result["skipped"]:
+            flash(f"Skipped {len(result['skipped'])} non-zip item(s): {summarize_items(result['skipped'])}.", "success")
+        if result["failures"]:
+            flash(
+                f"Failed to extract {len(result['failures'])} archive(s): {summarize_items(result['failures'])}.",
+                "error",
+            )
+        if not result["extracted"] and not result["skipped"] and not result["failures"]:
+            flash("No archives were extracted.", "error")
+        return explorer_redirect(root_key, current_path, sort_by)
+
     @app.post("/unzip")
     def unzip():
         root_key = request.form.get("root", "")
         archive_rel = request.form.get("archive_path", "")
         password = request.form.get("password") or None
         target_dir_name = (request.form.get("target_dir") or "").strip()
+        sort_by = request.form.get("sort", "name")
         archive_parent = str(Path(archive_rel).parent).replace("\\", "/")
         archive_parent = "" if archive_parent == "." else archive_parent
 
         try:
-            root = manager.get_destination_path(root_key)
-            archive_path = path_within_root(root, archive_rel)
-            if archive_path.suffix.lower() != ".zip" or not archive_path.is_file():
-                raise ArchiveError("Only zip files inside an allowed root can be extracted.")
-
-            if target_dir_name:
-                if "/" in target_dir_name or "\\" in target_dir_name or target_dir_name in {".", ".."}:
-                    raise ArchiveError("Extraction folder must be a single folder name.")
-                target_rel = str(Path(archive_rel).parent / target_dir_name)
-            else:
-                target_rel = str(Path(archive_rel).with_suffix(""))
-            target_dir = path_within_root(root, target_rel)
-
-            extracted = extract_archive(archive_path, target_dir, password=password)
-            flash(f"Extracted {len(extracted)} file(s) to {target_dir.name}.", "success")
-        except (ValueError, ArchiveError) as exc:
+            result = extract_archives_in_folder(
+                root_key,
+                archive_parent,
+                [archive_rel],
+                password=password,
+                target_dir_name=target_dir_name or None,
+                skip_non_zip=False,
+            )
+            if result["extracted"]:
+                extracted = result["extracted"][0]
+                flash(f"Extracted {extracted['count']} file(s) from {extracted['archive']} to {extracted['target']}.", "success")
+            if result["failures"]:
+                flash(result["failures"][0], "error")
+        except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
-        return redirect(url_for("explorer", root=root_key, path=archive_parent))
+        return explorer_redirect(root_key, archive_parent, sort_by)
 
     return app
 

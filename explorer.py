@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +45,124 @@ def relative_to_root(root: Path, path: Path) -> str:
         raise ValueError("Path is outside the configured root.") from exc
     text = str(relative).replace("\\", "/")
     return "" if text == "." else text
+
+
+def normalize_relative_path(value: str | Path) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if text in {"", "."}:
+        return ""
+    return text
+
+
+def validate_entry_name(name: str) -> str:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise ValueError("Name cannot be empty.")
+    if cleaned in {".", ".."}:
+        raise ValueError("Name cannot be '.' or '..'.")
+    if "/" in cleaned or "\\" in cleaned:
+        raise ValueError("Name must be a single file or folder name.")
+    return cleaned
+
+
+def resolve_entries_in_directory(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    relative_paths: list[str] | tuple[str, ...],
+) -> tuple[dict, Path, list[tuple[str, Path]]]:
+    root_info = resolve_root(destinations, root_key)
+    root = root_info["path"]
+    current_dir = path_within_root(root, current_relative_path)
+    current_relative = relative_to_root(root, current_dir)
+
+    resolved_entries: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for raw_relative_path in relative_paths:
+        relative_path = normalize_relative_path(raw_relative_path)
+        if not relative_path or relative_path in seen:
+            continue
+
+        entry_path = path_within_root(root, relative_path)
+        if entry_path == root:
+            raise ValueError("The configured explorer root cannot be modified.")
+
+        if relative_to_root(root, entry_path.parent) != current_relative:
+            raise ValueError("Selected entry is not in the current explorer folder.")
+        if not entry_path.exists():
+            raise FileNotFoundError(f"'{relative_path}' no longer exists.")
+
+        seen.add(relative_path)
+        resolved_entries.append((relative_path, entry_path))
+
+    if not resolved_entries:
+        raise ValueError("Select at least one entry.")
+
+    return root_info, current_dir, resolved_entries
+
+
+def delete_entries(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    relative_paths: list[str] | tuple[str, ...],
+) -> dict:
+    _, _, resolved_entries = resolve_entries_in_directory(destinations, root_key, current_relative_path, relative_paths)
+
+    deleted: list[str] = []
+    failures: list[str] = []
+    for relative_path, entry_path in resolved_entries:
+        try:
+            if entry_path.is_symlink() or entry_path.is_file():
+                entry_path.unlink()
+            elif entry_path.is_dir():
+                shutil.rmtree(entry_path)
+            else:
+                entry_path.unlink(missing_ok=True)
+            deleted.append(relative_path)
+        except OSError as exc:
+            failures.append(f"{Path(relative_path).name}: {exc}")
+
+    return {
+        "deleted": deleted,
+        "failures": failures,
+    }
+
+
+def rename_entry(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    relative_path: str,
+    new_name: str,
+) -> dict:
+    root_info, _, resolved_entries = resolve_entries_in_directory(
+        destinations,
+        root_key,
+        current_relative_path,
+        [relative_path],
+    )
+    original_relative_path, original_path = resolved_entries[0]
+    validated_name = validate_entry_name(new_name)
+    if original_path.name == validated_name:
+        return {
+            "old_relative_path": original_relative_path,
+            "new_relative_path": original_relative_path,
+            "renamed": False,
+            "name": validated_name,
+        }
+
+    target_path = path_within_root(root_info["path"], Path(original_relative_path).parent / validated_name)
+    if target_path.exists():
+        raise ValueError(f"'{validated_name}' already exists in this folder.")
+
+    original_path.rename(target_path)
+    return {
+        "old_relative_path": original_relative_path,
+        "new_relative_path": relative_to_root(root_info["path"], target_path),
+        "renamed": True,
+        "name": validated_name,
+    }
 
 
 def build_breadcrumbs(root_key: str, relative_path: str) -> list[dict]:
