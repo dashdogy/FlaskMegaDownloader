@@ -37,8 +37,12 @@ SIZE_PAIR_RE = re.compile(
     r"(?P<total>\d+(?:\.\d+)?)\s*(?P<total_unit>[KMGTP]?i?B)\b",
     re.IGNORECASE,
 )
+SHARED_UNIT_SIZE_PAIR_RE = re.compile(
+    r"(?P<done>\d+(?:\.\d+)?)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)\b",
+    re.IGNORECASE,
+)
 TOTAL_SIZE_RE = re.compile(r"\bof\s+(?P<total>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)\b", re.IGNORECASE)
-PERCENT_RE = re.compile(r"(?P<percent>\d{1,3}(?:\.\d+)?)%")
+PERCENT_RE = re.compile(r"(?P<percent>\d{1,3}(?:\.\d+)?)\s*%")
 ETA_HMS_RE = re.compile(r"(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
 ETA_WORD_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>seconds?|secs?|minutes?|mins?|hours?|hrs?)", re.IGNORECASE)
 SPEED_RE = re.compile(r"(?P<speed>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)/s\b", re.IGNORECASE)
@@ -320,6 +324,11 @@ def parse_progress_line(line: str) -> dict:
         update["bytes_done"] = parse_size_to_bytes(f"{size_pair.group('done')} {size_pair.group('done_unit')}")
         update["bytes_total"] = parse_size_to_bytes(f"{size_pair.group('total')} {size_pair.group('total_unit')}")
     else:
+        shared_unit_size_pair = SHARED_UNIT_SIZE_PAIR_RE.search(line_without_speed)
+        if shared_unit_size_pair:
+            update["bytes_done"] = parse_size_to_bytes(f"{shared_unit_size_pair.group('done')} {shared_unit_size_pair.group('unit')}")
+            update["bytes_total"] = parse_size_to_bytes(f"{shared_unit_size_pair.group('total')} {shared_unit_size_pair.group('unit')}")
+
         total_match = TOTAL_SIZE_RE.search(line_without_speed)
         if total_match:
             update["bytes_total"] = parse_size_to_bytes(f"{total_match.group('total')} {total_match.group('unit')}")
@@ -857,7 +866,7 @@ class DownloadManager:
         self._cancel_events: dict[str, threading.Event] = {}
         self._pause_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
-        self._progress_samples: dict[str, tuple[float, int]] = {}
+        self._progress_samples: dict[str, tuple[float, int, float | None]] = {}
         self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
@@ -1549,7 +1558,7 @@ class DownloadManager:
                     continue
                 cancel_event = self._cancel_events[job_id] = threading.Event()
                 pause_event = self._pause_events[job_id] = threading.Event()
-                self._progress_samples[job_id] = (time.monotonic(), 0)
+                self._progress_samples[job_id] = (time.monotonic(), 0, None)
                 job.status = "starting"
                 job.error = None
                 job.transfer.paused = False
@@ -1655,19 +1664,26 @@ class DownloadManager:
     ) -> None:
         now = time.monotonic()
         current_bytes_done = transfer.bytes_done
+        current_percent = clamp_percent(transfer.percent)
         sample = self._progress_samples.get(job_id)
         derived_speed: float | None = None
+        derived_eta_from_percent: int | None = None
 
         if sample is None:
-            self._progress_samples[job_id] = (now, current_bytes_done)
+            self._progress_samples[job_id] = (now, current_bytes_done, current_percent)
         else:
-            sample_time, sample_bytes = sample
-            if current_bytes_done != sample_bytes:
+            sample_time, sample_bytes, sample_percent = sample
+            if current_bytes_done != sample_bytes or current_percent != sample_percent:
                 elapsed = now - sample_time
                 byte_delta = current_bytes_done - sample_bytes
                 if elapsed > 0 and byte_delta > 0:
                     derived_speed = byte_delta / elapsed
-                self._progress_samples[job_id] = (now, current_bytes_done)
+                if elapsed > 0 and current_percent is not None and sample_percent is not None:
+                    percent_delta = current_percent - sample_percent
+                    if percent_delta > 0:
+                        remaining_percent = max(100.0 - current_percent, 0.0)
+                        derived_eta_from_percent = math.ceil(remaining_percent / (percent_delta / elapsed)) if remaining_percent else 0
+                self._progress_samples[job_id] = (now, current_bytes_done, current_percent)
 
         if not speed_provided and derived_speed is not None:
             transfer.speed_bps = derived_speed
@@ -1678,6 +1694,11 @@ class DownloadManager:
             elif not eta_provided and transfer.speed_bps and transfer.speed_bps > 0:
                 remaining = max(transfer.bytes_total - transfer.bytes_done, 0)
                 transfer.eta_seconds = math.ceil(remaining / transfer.speed_bps) if remaining else 0
+        elif current_percent is not None:
+            if current_percent >= 100:
+                transfer.eta_seconds = 0
+            elif not eta_provided and derived_eta_from_percent is not None:
+                transfer.eta_seconds = derived_eta_from_percent
 
     def _finish_job(self, job_id: str, status: str, error: str | None) -> None:
         with self._lock:
