@@ -101,6 +101,13 @@
         return `${seconds}s`;
     };
 
+    const formatPartialTotal = (value) => {
+        if (value === null || value === undefined || Number(value) <= 0) {
+            return "Unknown";
+        }
+        return formatBytes(value);
+    };
+
     const formatTimestamp = (value) => {
         if (!value) {
             return "Unknown";
@@ -222,7 +229,7 @@
 
     const renderSummary = (summary) => {
         const totalLabel = summary.has_unknown_total
-            ? `${formatBytes(summary.bytes_done)} / partial total`
+            ? `${formatBytes(summary.bytes_done)} / ${formatPartialTotal(summary.bytes_total)}`
             : `${formatBytes(summary.bytes_done)} / ${formatBytes(summary.bytes_total)}`;
 
         summaryGrid.innerHTML = [
@@ -332,7 +339,7 @@
                 </div>
                 <div class="metric-row">
                     <span>${escapeHtml(formatBytes(batch.bytes_done))}</span>
-                    <span>${escapeHtml(batch.has_unknown_total ? "Partial total" : formatBytes(batch.bytes_total))}</span>
+                    <span>${escapeHtml(batch.has_unknown_total ? formatPartialTotal(batch.bytes_total) : formatBytes(batch.bytes_total))}</span>
                     <span>${escapeHtml(speedLabel)}</span>
                     <span>${escapeHtml(etaLabel)}</span>
                 </div>
