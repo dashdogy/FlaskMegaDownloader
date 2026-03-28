@@ -22,18 +22,18 @@
         {% endfor %}
     </div>
 
-    <div class="breadcrumbs">
-        {% for crumb in explorer.breadcrumbs %}
-            <a href="{{ url_for('explorer', root=crumb.root, path=crumb.path, sort=explorer.sort) }}">{{ crumb.label }}</a>
-        {% endfor %}
-    </div>
+    {% if explorer.current_path %}
+        <div class="breadcrumbs">
+            {% for crumb in explorer.breadcrumbs %}
+                <a href="{{ url_for('explorer', root=crumb.root, path=crumb.path, sort=explorer.sort) }}">{{ crumb.label }}</a>
+            {% endfor %}
+        </div>
 
-    <div class="explorer-meta">
-        <span>{{ explorer.current_label }}</span>
-        {% if explorer.current_path %}
+        <div class="explorer-meta">
+            <span>{{ explorer.current_label }}</span>
             <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.parent_path, sort=explorer.sort) }}">Go Up</a>
-        {% endif %}
-    </div>
+        </div>
+    {% endif %}
 
     {% if move_confirmation %}
         <div class="move-confirmation">

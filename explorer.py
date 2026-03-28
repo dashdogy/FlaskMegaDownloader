@@ -360,15 +360,16 @@ def list_directory(
 
     entries.sort(key=sort_key)
     parent_path = ""
+    current_relative = relative_to_root(root, current_path)
     if relative_path:
         parent_path = relative_to_root(root, current_path.parent)
 
     return {
         "root": root_info,
-        "current_path": relative_to_root(root, current_path),
-        "current_label": str(current_path),
+        "current_path": current_relative,
+        "current_label": current_relative or root_info["label"],
         "parent_path": parent_path,
         "entries": [entry.to_dict() for entry in entries],
-        "breadcrumbs": build_breadcrumbs(root_key, relative_to_root(root, current_path)),
+        "breadcrumbs": build_breadcrumbs(root_key, current_relative),
         "sort": sort_by,
     }
