@@ -68,6 +68,24 @@ class FakeRarError(Exception):
     pass
 
 
+class SuccessfulSevenZipProcess:
+    def __init__(self, args, *, output_files: dict[str, bytes]) -> None:
+        self.args = args
+        self.returncode = 0
+        output_arg = next(item for item in args if item.startswith("-o"))
+        self.output_dir = Path(output_arg[2:])
+        for relative_path, payload in output_files.items():
+            target_path = self.output_dir / relative_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(payload)
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self):
+        return ("", "")
+
+
 class ArchiveTests(unittest.TestCase):
     def test_archive_type_detection_supports_zip_rar_and_7z_entrypoints(self) -> None:
         self.assertEqual(archive_type_for_path(Path("sample.zip")), "zip")
@@ -165,7 +183,17 @@ class ArchiveTests(unittest.TestCase):
             archive_path.write_bytes(b"placeholder")
             destination = root / "output"
 
-            with patch.object(archives.subprocess, "run", side_effect=fake_run):
+            with (
+                patch.object(archives.subprocess, "run", side_effect=fake_run),
+                patch.object(
+                    archives.subprocess,
+                    "Popen",
+                    side_effect=lambda args, **kwargs: SuccessfulSevenZipProcess(
+                        args,
+                        output_files={"folder/file.txt": b"sevenzip-payload"},
+                    ),
+                ),
+            ):
                 extracted = extract_archive(archive_path, destination, password="secret123")
 
             self.assertEqual(len(extracted), 1)
@@ -178,12 +206,6 @@ class ArchiveTests(unittest.TestCase):
         def fake_run(args, stdout=None, stderr=None, text=None, check=None):
             if args[1] == "l":
                 return subprocess.CompletedProcess(args, 0, stdout="----------\nPath = film.mkv\n", stderr="")
-            if args[1] == "x":
-                output_arg = next(item for item in args if item.startswith("-o"))
-                output_dir = Path(output_arg[2:])
-                output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "film.mkv").write_bytes(b"split-payload")
-                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
             raise AssertionError(f"Unexpected 7z command: {args}")
 
         with TemporaryDirectory(prefix="archive-7z-split-") as temp_dir:
@@ -192,7 +214,17 @@ class ArchiveTests(unittest.TestCase):
             archive_path.write_bytes(b"placeholder")
             destination = root / "output"
 
-            with patch.object(archives.subprocess, "run", side_effect=fake_run):
+            with (
+                patch.object(archives.subprocess, "run", side_effect=fake_run),
+                patch.object(
+                    archives.subprocess,
+                    "Popen",
+                    side_effect=lambda args, **kwargs: SuccessfulSevenZipProcess(
+                        args,
+                        output_files={"film.mkv": b"split-payload"},
+                    ),
+                ),
+            ):
                 extracted = extract_archive(archive_path, destination)
 
             self.assertEqual(Path(extracted[0]).name, "film.mkv")

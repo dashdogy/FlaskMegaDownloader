@@ -10,12 +10,13 @@ from urllib.parse import urlsplit, urlunsplit
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 
 import config as default_config
+from archive_extract_manager import ArchiveExtractManager
 from archives import (
     ArchiveError,
     archive_type_for_path,
     default_archive_target_name,
-    extract_archive,
     is_supported_archive_path,
+    probe_archive,
 )
 from downloader import DownloadManager, ensure_destination_writable
 from explorer import (
@@ -26,6 +27,7 @@ from explorer import (
     path_within_root,
     preview_move_entries,
     rename_entry,
+    relative_to_root,
     resolve_entries_in_directory,
     resolve_move_target,
     validate_entry_name,
@@ -137,10 +139,16 @@ def create_app() -> Flask:
         mediainfo_binary=app.config["MEDIAINFO_BINARY"],
         bluray_min_title_seconds=app.config["BLURAY_MIN_TITLE_SECONDS"],
     )
+    archive_manager = ArchiveExtractManager(
+        storage=storage,
+        seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
+    )
     app.extensions["download_manager"] = manager
     app.extensions["media_compile_manager"] = media_manager
+    app.extensions["archive_extract_manager"] = archive_manager
     atexit.register(manager.stop)
     atexit.register(media_manager.stop)
+    atexit.register(archive_manager.stop)
 
     def explorer_redirect(root_key: str, current_path: str, sort_by: str):
         return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
@@ -171,6 +179,7 @@ def create_app() -> Flask:
     def dashboard_payload() -> dict:
         payload = manager.dashboard_payload()
         payload["media"] = media_manager.dashboard_payload(destination_label_lookup())
+        payload["archives"] = archive_manager.dashboard_payload()
         return payload
 
     def move_favorite_options() -> list[dict]:
@@ -252,7 +261,7 @@ def create_app() -> Flask:
             relative_paths,
         )
         root = root_info["path"]
-        extracted: list[dict] = []
+        prepared_jobs: list[dict] = []
         skipped: list[str] = []
         failures: list[str] = []
 
@@ -274,9 +283,8 @@ def create_app() -> Flask:
             target_dir = path_within_root(root, target_relative)
 
             try:
-                extracted_files = extract_archive(
+                probe = probe_archive(
                     entry_path,
-                    target_dir,
                     password=password,
                     seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
                 )
@@ -284,17 +292,29 @@ def create_app() -> Flask:
                 failures.append(f"{entry_path.name}: {exc}")
                 continue
 
-            extracted.append(
+            prepared_jobs.append(
                 {
-                    "archive": entry_path.name,
+                    "root_key": root_key,
+                    "archive_relative_path": relative_path,
+                    "archive_path": str(entry_path),
+                    "archive_display_name": entry_path.name,
                     "archive_type": archive_type,
-                    "target": target_dir.name,
-                    "count": len(extracted_files),
+                    "target_relative_path": relative_to_root(root, target_dir),
+                    "target_path": str(target_dir),
+                    "bytes_total": probe.bytes_total,
                 }
             )
 
+        jobs = archive_manager.submit(prepared_jobs)
         return {
-            "extracted": extracted,
+            "queued": [
+                {
+                    "archive": job.archive_display_name,
+                    "archive_type": job.archive_type,
+                    "target": Path(job.target_path).name,
+                }
+                for job in jobs
+            ],
             "skipped": skipped,
             "failures": failures,
         }
@@ -587,10 +607,10 @@ def create_app() -> Flask:
             flash(str(exc), "error")
             return explorer_redirect(root_key, current_path, sort_by)
 
-        if result["extracted"]:
-            extracted_labels = [f"{item['archive']} -> {item['target']}" for item in result["extracted"]]
+        if result["queued"]:
+            extracted_labels = [f"{item['archive']} -> {item['target']}" for item in result["queued"]]
             flash(
-                f"Extracted {len(result['extracted'])} archive(s): "
+                f"Queued {len(result['queued'])} archive extraction job(s): "
                 f"{summarize_items(extracted_labels)}.",
                 "success",
             )
@@ -601,11 +621,11 @@ def create_app() -> Flask:
             )
         if result["failures"]:
             flash(
-                f"Failed to extract {len(result['failures'])} archive(s): {summarize_items(result['failures'])}.",
+                f"Failed to queue {len(result['failures'])} archive(s): {summarize_items(result['failures'])}.",
                 "error",
             )
-        if not result["extracted"] and not result["skipped"] and not result["failures"]:
-            flash("No archives were extracted.", "error")
+        if not result["queued"] and not result["skipped"] and not result["failures"]:
+            flash("No archive extraction jobs were queued.", "error")
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/move-favorites")
@@ -785,9 +805,9 @@ def create_app() -> Flask:
                 target_dir_name=target_dir_name or None,
                 skip_non_archive=False,
             )
-            if result["extracted"]:
-                extracted = result["extracted"][0]
-                flash(f"Extracted {extracted['count']} file(s) from {extracted['archive']} to {extracted['target']}.", "success")
+            if result["queued"]:
+                queued = result["queued"][0]
+                flash(f"Queued extraction from {queued['archive']} to {queued['target']}.", "success")
             if result["failures"]:
                 flash(result["failures"][0], "error")
         except (ValueError, FileNotFoundError, ArchiveError) as exc:

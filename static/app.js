@@ -8,6 +8,8 @@
     const batchList = document.getElementById("batch-list");
     const backendLabel = document.getElementById("backend-label");
     const backendNote = document.getElementById("backend-note");
+    const archiveSummaryGrid = document.getElementById("archive-summary-grid");
+    const archiveJobList = document.getElementById("archive-job-list");
     const mediaSummaryGrid = document.getElementById("media-summary-grid");
     const mediaJobList = document.getElementById("media-job-list");
     const mediaBackendLabel = document.getElementById("media-backend-label");
@@ -277,6 +279,30 @@
         `).join("");
     };
 
+    const renderArchiveSummary = (summary) => {
+        if (!archiveSummaryGrid) {
+            return;
+        }
+        const totalLabel = summary.has_unknown_total
+            ? `${formatBytes(summary.bytes_done)} / ${formatPartialTotal(summary.bytes_total)}`
+            : `${formatBytes(summary.bytes_done)} / ${formatBytes(summary.bytes_total)}`;
+
+        archiveSummaryGrid.innerHTML = [
+            ["Total Jobs", summary.total_jobs],
+            ["Queued", summary.queued_jobs],
+            ["Active", summary.active_jobs],
+            ["Completed", summary.completed_jobs],
+            ["Failed", summary.failed_jobs],
+            ["Extract Speed", formatSpeed(summary.throughput_bps)],
+        ].map(([label, value]) => `
+            <div class="stat-tile">
+                <span>${escapeHtml(label)}</span>
+                <strong>${escapeHtml(value)}</strong>
+                <small class="subtle">${escapeHtml(totalLabel)}</small>
+            </div>
+        `).join("");
+    };
+
     const renderJob = (job) => {
         const percent = progressPercent(job.transfer);
         const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
@@ -451,6 +477,41 @@
         `;
     };
 
+    const renderArchiveJob = (job) => {
+        const percent = progressPercent(job.transfer);
+        const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
+        const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
+        const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
+        const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";
+
+        return `
+            <article class="job-card media-job-card">
+                <div class="job-header">
+                    <div>
+                        <strong>${escapeHtml(job.archive_display_name)}</strong>
+                        <p class="job-url">${escapeHtml(job.archive_relative_path)}</p>
+                    </div>
+                    <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status_label)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(job.archive_type.toUpperCase())}</span>
+                    <span>${escapeHtml(job.target_display || job.target_relative_path || job.target_path)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(formatBytes(job.transfer.bytes_done))}</span>
+                    <span>${escapeHtml(job.transfer.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>
+                    <span>${escapeHtml(speedLabel)}</span>
+                    <span>${escapeHtml(etaLabel)}</span>
+                </div>
+                ${progressBar}
+                <div class="metric-row">
+                    <span>${escapeHtml(visibleMessage)}</span>
+                </div>
+                ${job.error ? `<div class="flash flash-error">${escapeHtml(job.error)}</div>` : ""}
+            </article>
+        `;
+    };
+
     const renderDashboard = (payload) => {
         if (backendLabel) {
             backendLabel.textContent = payload.backend.label;
@@ -473,7 +534,13 @@
         }
 
         renderSummary(payload.summary);
+        renderArchiveSummary(payload.archives.summary);
         renderMediaSummary(payload.media.summary);
+        if (archiveJobList) {
+            archiveJobList.innerHTML = payload.archives.jobs.length
+                ? payload.archives.jobs.map(renderArchiveJob).join("")
+                : '<div class="stat-tile"><span>No archive jobs yet</span><strong>Queue is empty</strong><small class="subtle">Use the explorer to queue archive extraction jobs.</small></div>';
+        }
         if (mediaJobList) {
             mediaJobList.innerHTML = payload.media.jobs.length
                 ? payload.media.jobs.map(renderMediaJob).join("")

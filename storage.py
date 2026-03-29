@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from models import FavoriteDestination, Job, MediaJob, MoveFavorite
+from models import ArchiveJob, FavoriteDestination, Job, MediaJob, MoveFavorite
 
 
 LOGGER = logging.getLogger(__name__)
@@ -89,6 +89,24 @@ class SQLiteStorage:
                     output_tail_json TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS archive_jobs (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    root_key TEXT NOT NULL,
+                    archive_relative_path TEXT NOT NULL,
+                    archive_path TEXT NOT NULL,
+                    archive_display_name TEXT NOT NULL,
+                    archive_type TEXT NOT NULL,
+                    target_relative_path TEXT NOT NULL,
+                    target_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error TEXT,
+                    transfer_json TEXT NOT NULL,
+                    output_tail_json TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS favorite_destinations (
                     key TEXT PRIMARY KEY,
                     label TEXT NOT NULL,
@@ -136,6 +154,7 @@ class SQLiteStorage:
         hidden_base_destinations = [str(item) for item in raw_payload.get("hidden_base_destinations", [])]
         move_favorites = [MoveFavorite.from_dict(item) for item in raw_payload.get("move_favorites", [])]
         media_jobs = [MediaJob.from_dict(item) for item in raw_payload.get("media_jobs", [])]
+        archive_jobs = [ArchiveJob.from_dict(item) for item in raw_payload.get("archive_jobs", [])]
 
         with self._lock:
             self.save_state(
@@ -144,6 +163,7 @@ class SQLiteStorage:
                 hidden_base_destinations=hidden_base_destinations,
                 move_favorites=move_favorites,
                 media_jobs=media_jobs,
+                archive_jobs=archive_jobs,
             )
             with self._connect() as connection:
                 connection.execute(
@@ -235,6 +255,17 @@ class SQLiteStorage:
             ).fetchall()
         return [self._media_job_from_row(row) for row in rows]
 
+    def load_archive_jobs(self) -> list[ArchiveJob]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM archive_jobs
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+        return [self._archive_job_from_row(row) for row in rows]
+
     def save_state(
         self,
         jobs: Iterable[Job],
@@ -242,6 +273,7 @@ class SQLiteStorage:
         hidden_base_destinations: Iterable[str],
         move_favorites: Iterable[MoveFavorite] | None = None,
         media_jobs: Iterable[MediaJob] | None = None,
+        archive_jobs: Iterable[ArchiveJob] | None = None,
     ) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN")
@@ -252,6 +284,8 @@ class SQLiteStorage:
                 self._replace_move_favorites(connection, move_favorites)
             if media_jobs is not None:
                 self._replace_media_jobs(connection, media_jobs)
+            if archive_jobs is not None:
+                self._replace_archive_jobs(connection, archive_jobs)
             connection.commit()
 
     def save_move_favorites(self, move_favorites: Iterable[MoveFavorite]) -> None:
@@ -270,6 +304,12 @@ class SQLiteStorage:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN")
             self._replace_media_jobs(connection, media_jobs)
+            connection.commit()
+
+    def save_archive_jobs(self, archive_jobs: Iterable[ArchiveJob]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            self._replace_archive_jobs(connection, archive_jobs)
             connection.commit()
 
     def _replace_download_jobs(self, connection: sqlite3.Connection, jobs: Iterable[Job]) -> None:
@@ -346,6 +386,39 @@ class SQLiteStorage:
                 title_duration_seconds, title_size_bytes, status, created_at, updated_at, error,
                 transfer_json, verification_json, output_tail_json
             ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+    def _replace_archive_jobs(self, connection: sqlite3.Connection, archive_jobs: Iterable[ArchiveJob]) -> None:
+        connection.execute("DELETE FROM archive_jobs")
+        rows = [
+            (
+                job.id,
+                job.batch_id,
+                job.root_key,
+                job.archive_relative_path,
+                job.archive_path,
+                job.archive_display_name,
+                job.archive_type,
+                job.target_relative_path,
+                job.target_path,
+                job.status,
+                job.created_at,
+                job.updated_at,
+                job.error,
+                json.dumps(job.transfer.to_dict()),
+                json.dumps(job.output_tail),
+            )
+            for job in archive_jobs
+        ]
+        connection.executemany(
+            """
+            INSERT INTO archive_jobs(
+                id, batch_id, root_key, archive_relative_path, archive_path,
+                archive_display_name, archive_type, target_relative_path, target_path,
+                status, created_at, updated_at, error, transfer_json, output_tail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -427,6 +500,26 @@ class SQLiteStorage:
             "output_tail": json.loads(row["output_tail_json"] or "[]"),
         }
         return MediaJob.from_dict(payload)
+
+    def _archive_job_from_row(self, row: sqlite3.Row) -> ArchiveJob:
+        payload = {
+            "id": row["id"],
+            "batch_id": row["batch_id"],
+            "root_key": row["root_key"],
+            "archive_relative_path": row["archive_relative_path"],
+            "archive_path": row["archive_path"],
+            "archive_display_name": row["archive_display_name"],
+            "archive_type": row["archive_type"],
+            "target_relative_path": row["target_relative_path"],
+            "target_path": row["target_path"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "error": row["error"],
+            "transfer": json.loads(row["transfer_json"]),
+            "output_tail": json.loads(row["output_tail_json"] or "[]"),
+        }
+        return ArchiveJob.from_dict(payload)
 
 
 JsonStorage = SQLiteStorage

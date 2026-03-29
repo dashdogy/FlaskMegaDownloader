@@ -31,6 +31,15 @@ MEDIA_JOB_STATUSES = {
 ACTIVE_MEDIA_JOB_STATUSES = {"scanning", "compiling", "verifying"}
 RETRYABLE_MEDIA_JOB_STATUSES = {"failed", "canceled"}
 
+ARCHIVE_JOB_STATUSES = {
+    "queued",
+    "extracting",
+    "completed",
+    "failed",
+}
+ACTIVE_ARCHIVE_JOB_STATUSES = {"extracting"}
+RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed"}
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -133,6 +142,61 @@ class ExplorerEntry:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass(slots=True)
+class ArchiveJob:
+    id: str
+    batch_id: str
+    root_key: str
+    archive_relative_path: str
+    archive_path: str
+    archive_display_name: str
+    archive_type: str
+    target_relative_path: str
+    target_path: str
+    status: str = "queued"
+    created_at: str = field(default_factory=utcnow_iso)
+    updated_at: str = field(default_factory=utcnow_iso)
+    error: str | None = None
+    transfer: TransferStatus = field(default_factory=TransferStatus)
+    output_tail: list[str] = field(default_factory=list)
+
+    def append_output(self, line: str) -> None:
+        line = line.strip()
+        if not line:
+            return
+        self.output_tail.append(line)
+        self.output_tail = self.output_tail[-12:]
+        self.transfer.last_message = line
+
+    def touch(self) -> None:
+        self.updated_at = utcnow_iso()
+
+    def to_dict(self) -> dict:
+        payload = asdict(self)
+        payload["transfer"] = self.transfer.to_dict()
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ArchiveJob":
+        return cls(
+            id=data["id"],
+            batch_id=data["batch_id"],
+            root_key=data["root_key"],
+            archive_relative_path=data["archive_relative_path"],
+            archive_path=data["archive_path"],
+            archive_display_name=data["archive_display_name"],
+            archive_type=data["archive_type"],
+            target_relative_path=data["target_relative_path"],
+            target_path=data["target_path"],
+            status=data.get("status", "queued"),
+            created_at=data.get("created_at", utcnow_iso()),
+            updated_at=data.get("updated_at", utcnow_iso()),
+            error=data.get("error"),
+            transfer=TransferStatus.from_dict(data.get("transfer")),
+            output_tail=list(data.get("output_tail", [])),
+        )
 
 
 @dataclass(slots=True)
