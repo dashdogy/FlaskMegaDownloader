@@ -1040,7 +1040,14 @@ class DownloadManager:
         relative_path = relative_to_root(root, resolved_path)
         return resolved_path, relative_path, False
 
-    def submit(self, urls: list[str], destination_key: str, destination_subpath: str = "") -> list[Job]:
+    def submit(
+        self,
+        urls: list[str],
+        destination_key: str,
+        destination_subpath: str = "",
+        *,
+        metadata_overrides: dict[str, dict[str, int | str | None]] | None = None,
+    ) -> list[Job]:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
         if not self.destinations:
@@ -1049,19 +1056,32 @@ class DownloadManager:
         ensure_destination_writable(destination_path)
         batch_id = uuid.uuid4().hex[:12]
         prepared_jobs: list[dict] = []
+        metadata_overrides = metadata_overrides or {}
         for url in urls:
             job_id = uuid.uuid4().hex
             fallback_prefix = f"job-{job_id[:8]}"
+            override_metadata = metadata_overrides.get(url, {})
             try:
                 metadata = self.adapter.probe_metadata(url, fallback_prefix)
             except DownloadError:
                 metadata = {}
+            adapter_display_name = metadata.get("display_name")
+            if adapter_display_name == "Resolving file name...":
+                adapter_display_name = None
             prepared_jobs.append(
                 {
                     "id": job_id,
                     "url": url,
-                    "display_name": metadata.get("display_name") or infer_display_name(url, fallback_prefix),
-                    "bytes_total": metadata.get("bytes_total"),
+                    "display_name": (
+                        override_metadata.get("display_name")
+                        or adapter_display_name
+                        or infer_display_name(url, fallback_prefix)
+                    ),
+                    "bytes_total": (
+                        override_metadata.get("bytes_total")
+                        if override_metadata.get("bytes_total") is not None
+                        else metadata.get("bytes_total")
+                    ),
                 }
             )
         new_jobs: list[Job] = []

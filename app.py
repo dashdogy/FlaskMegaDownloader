@@ -24,7 +24,7 @@ from explorer import (
     resolve_move_target,
     validate_entry_name,
 )
-from filecrypt_resolver import FilecryptResolutionError, expand_submission_urls
+from filecrypt_resolver import FilecryptResolutionError, expand_submission_urls_with_metadata
 from media_compiler import MediaCompileManager, detect_bluray_source
 from models import MoveFavorite
 from storage import JsonStorage
@@ -312,13 +312,18 @@ def create_app() -> Flask:
             return redirect(url_for("dashboard"))
 
         try:
-            urls, resolution_summary = expand_submission_urls(urls)
+            urls, resolution_summary, metadata_overrides = expand_submission_urls_with_metadata(urls)
         except FilecryptResolutionError as exc:
             flash(str(exc), "error")
             return redirect(url_for("dashboard"))
 
         try:
-            jobs = manager.submit(urls, destination_key, destination_subpath)
+            jobs = manager.submit(
+                urls,
+                destination_key,
+                destination_subpath,
+                metadata_overrides=metadata_overrides,
+            )
         except ValueError as exc:
             flash(str(exc), "error")
             return redirect(url_for("dashboard"))
