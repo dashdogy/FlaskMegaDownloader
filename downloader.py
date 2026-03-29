@@ -53,6 +53,7 @@ MEGACMD_LS_SUMMARY_RE = re.compile(
     r"^(?P<flags>\S+)\s+(?P<versions>\d+)\s+(?P<size>\d+)\s+(?P<date>\S+)\s+(?P<name>.+)$"
 )
 MEGACMD_DU_RE = re.compile(r"^\s*(?P<size>\d+)(?:\s+(?P<path>.+?))?\s*$")
+MEGACMD_SEPARATOR_RE = re.compile(r"^[\-\s]{3,}$")
 
 
 class DownloadError(Exception):
@@ -175,7 +176,7 @@ def parse_megacmd_ls_summary(output: str) -> list[dict]:
     entries: list[dict] = []
     for raw_line in output.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("FLAGS"):
+        if not line or line.startswith("FLAGS") or MEGACMD_SEPARATOR_RE.fullmatch(line):
             continue
         match = MEGACMD_LS_SUMMARY_RE.match(line)
         if not match:
