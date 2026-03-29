@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import re
 import shutil
@@ -23,9 +24,11 @@ from models import (
     TransferStatus,
     utcnow_iso,
 )
+from process_utils import stop_process
 from storage import JsonStorage
 
 
+LOGGER = logging.getLogger(__name__)
 TINFO_NAME_IDS = {"2"}
 TINFO_DURATION_IDS = {"9"}
 TINFO_SIZE_BYTES_IDS = {"11"}
@@ -314,9 +317,8 @@ class MediaCompileManager:
         for cancel_event in self._cancel_events.values():
             cancel_event.set()
         with self._lock:
-            for process in self._active_processes.values():
-                if process.poll() is None:
-                    process.terminate()
+            for process in list(self._active_processes.values()):
+                stop_process(process)
 
     def _load_jobs(self) -> None:
         loaded_jobs = self.storage.load_media_jobs()
@@ -393,6 +395,13 @@ class MediaCompileManager:
             self._persist_locked(force=True)
         return new_jobs
 
+    def destination_in_use(self, destination_key: str) -> bool:
+        with self._lock:
+            return any(
+                job.output_destination_key == destination_key and job.status in {"queued", *ACTIVE_MEDIA_JOB_STATUSES}
+                for job in self._jobs.values()
+            )
+
     def cancel_job(self, job_id: str) -> MediaJob:
         with self._lock:
             job = self._require_job(job_id)
@@ -410,7 +419,7 @@ class MediaCompileManager:
             cancel_event.set()
             process = self._active_processes.get(job_id)
             if process and process.poll() is None:
-                process.terminate()
+                stop_process(process)
             job.error = "Cancel request sent."
             job.touch()
             self._persist_locked(force=True)
@@ -428,6 +437,8 @@ class MediaCompileManager:
             job.title_duration_seconds = None
             job.title_size_bytes = None
             job.output_file_path = None
+            job.staging_directory = None
+            job.staged_output_file_path = None
             job.mkv_filename = None
             job.transfer = TransferStatus()
             job.verification = MediaVerification()
@@ -553,33 +564,52 @@ class MediaCompileManager:
             except Empty:
                 continue
 
-            with self._lock:
-                job = self._jobs.get(job_id)
-                if not job or job.status != "queued":
-                    continue
-                cancel_event = self._cancel_events[job_id] = threading.Event()
-                self._progress_samples[job_id] = (time.monotonic(), 0)
-                job.status = "scanning"
-                job.error = None
-                job.transfer.paused = False
-                job.transfer.started_at = utcnow_iso()
-                job.transfer.finished_at = None
-                job.transfer.bytes_done = 0
-                job.transfer.bytes_total = None
-                job.transfer.percent = None
-                job.touch()
-                self._persist_locked(force=True)
-
             try:
-                title = self._scan_job(job_id, cancel_event)
-                self._compile_job(job_id, cancel_event, title)
-                self._verify_job(job_id, cancel_event)
-            except MediaCompileCanceled as exc:
-                self._finish_job(job_id, status="canceled", error=str(exc))
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if not job or job.status != "queued":
+                        continue
+                    cancel_event = self._cancel_events[job_id] = threading.Event()
+                    self._progress_samples[job_id] = (time.monotonic(), 0)
+                    job.status = "scanning"
+                    job.error = None
+                    job.transfer.paused = False
+                    job.transfer.started_at = utcnow_iso()
+                    job.transfer.finished_at = None
+                    job.transfer.bytes_done = 0
+                    job.transfer.bytes_total = None
+                    job.transfer.percent = None
+                    output_destination = Path(job.output_destination_path)
+                    output_destination.mkdir(parents=True, exist_ok=True)
+                    staging_directory = output_destination / ".remux-staging" / job.id
+                    if staging_directory.exists():
+                        shutil.rmtree(staging_directory, ignore_errors=True)
+                    staging_directory.mkdir(parents=True, exist_ok=True)
+                    job.staging_directory = str(staging_directory)
+                    job.staged_output_file_path = None
+                    job.touch()
+                    self._persist_locked(force=True)
+
+                final_status = "completed"
+                final_error: str | None = None
+                try:
+                    title = self._scan_job(job_id, cancel_event)
+                    self._compile_job(job_id, cancel_event, title)
+                    self._verify_job(job_id, cancel_event)
+                except MediaCompileCanceled as exc:
+                    final_status = "canceled"
+                    final_error = str(exc)
+                except Exception as exc:
+                    final_status = "failed"
+                    final_error = str(exc)
+
+                self._finish_job(job_id, status=final_status, error=final_error)
             except Exception as exc:
-                self._finish_job(job_id, status="failed", error=str(exc))
-            else:
-                self._finish_job(job_id, status="completed", error=None)
+                LOGGER.exception("Media worker failed while handling job %s", job_id)
+                try:
+                    self._finish_job(job_id, status="failed", error=str(exc))
+                except Exception:
+                    LOGGER.exception("Media worker could not persist failure state for job %s", job_id)
             finally:
                 with self._lock:
                     self._cancel_events.pop(job_id, None)
@@ -592,6 +622,13 @@ class MediaCompileManager:
                 self._active_processes.pop(job_id, None)
             else:
                 self._active_processes[job_id] = process
+
+    def _cleanup_staging_directory(self, job: MediaJob) -> None:
+        if not job.staging_directory:
+            return
+        staging_directory = Path(job.staging_directory)
+        if staging_directory.exists():
+            shutil.rmtree(staging_directory, ignore_errors=True)
 
     def _scan_job(self, job_id: str, cancel_event: threading.Event) -> TitleInfo:
         job = self._require_job(job_id)
@@ -637,7 +674,11 @@ class MediaCompileManager:
     def _compile_job(self, job_id: str, cancel_event: threading.Event, title: TitleInfo) -> None:
         job = self._require_job(job_id)
         output_dir = Path(job.output_destination_path)
+        if not job.staging_directory:
+            raise MediaCompileError("Missing remux staging directory.")
+        staging_directory = Path(job.staging_directory)
         output_dir.mkdir(parents=True, exist_ok=True)
+        staging_directory.mkdir(parents=True, exist_ok=True)
         self._update_job(job_id, status="compiling", message="Starting MakeMKV remux.")
         command = [
             self._makemkvcon_path or self.makemkvcon_binary,
@@ -647,35 +688,32 @@ class MediaCompileManager:
             "mkv",
             build_source_spec(Path(job.source_path)),
             str(title.title_id),
-            str(output_dir),
+            str(staging_directory),
         ]
         self._run_robot_command(job_id, command, cancel_event, stage="compiling")
 
-        expected_output = Path(job.output_file_path or "")
-        if expected_output and expected_output.exists():
-            return
-
-        created_files = sorted(
-            output_dir.glob("*.mkv"),
-            key=lambda item: item.stat().st_mtime if item.exists() else 0,
-            reverse=True,
-        )
-        if not created_files:
-            raise MediaCompileError("MakeMKV finished without producing an MKV file.")
+        created_files = sorted(staging_directory.glob("*.mkv"))
+        if len(created_files) != 1:
+            raise MediaCompileError(
+                "MakeMKV remux staging did not produce exactly one MKV file."
+                if created_files
+                else "MakeMKV finished without producing an MKV file."
+            )
         selected_output = created_files[0]
-        self._update_job(job_id, output_file_path=str(selected_output), mkv_filename=selected_output.name)
+        self._update_job(job_id, staged_output_file_path=str(selected_output), mkv_filename=selected_output.name)
 
     def _verify_job(self, job_id: str, cancel_event: threading.Event) -> None:
         job = self._require_job(job_id)
-        output_file_path = Path(job.output_file_path or "")
-        if not output_file_path.exists():
+        staged_output_file_path = Path(job.staged_output_file_path or "")
+        final_output_file_path = Path(job.output_file_path or "")
+        if not staged_output_file_path.exists():
             raise MediaCompileError("Compiled MKV file is missing before verification.")
         self._update_job(job_id, status="verifying", percent=100, message="Running MediaInfo verification.")
         if cancel_event.is_set():
             raise MediaCompileCanceled("Canceled by user.")
 
         result = subprocess.run(
-            [self._mediainfo_path or self.mediainfo_binary, "--Output=JSON", str(output_file_path)],
+            [self._mediainfo_path or self.mediainfo_binary, "--Output=JSON", str(staged_output_file_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -686,15 +724,23 @@ class MediaCompileManager:
         if result.returncode != 0:
             raise MediaCompileError(result.stdout.strip() or "MediaInfo verification failed.")
 
+        if final_output_file_path.exists():
+            raise MediaCompileError(f"Output file already exists: {final_output_file_path}")
+        final_output_file_path.parent.mkdir(parents=True, exist_ok=True)
+
         verification = parse_mediainfo_json(result.stdout)
+        shutil.move(str(staged_output_file_path), str(final_output_file_path))
         self._update_job(
             job_id,
             status="verifying",
             verification=verification,
-            bytes_done=output_file_path.stat().st_size,
+            output_file_path=str(final_output_file_path),
+            staged_output_file_path=None,
+            bytes_done=final_output_file_path.stat().st_size,
             percent=100,
             message="Verification finished.",
         )
+        self._cleanup_staging_directory(job)
 
     def _run_robot_command(
         self,
@@ -717,15 +763,19 @@ class MediaCompileManager:
             if process.stdout is not None:
                 for raw_line in process.stdout:
                     if cancel_event.is_set():
-                        process.terminate()
+                        stop_process(process)
                         raise MediaCompileCanceled("Canceled by user.")
                     line = raw_line.strip()
                     if not line:
                         continue
                     output_lines.append(line)
                     self._handle_robot_line(job_id, line, stage=stage)
+            if cancel_event.is_set():
+                stop_process(process)
+                raise MediaCompileCanceled("Canceled by user.")
             return_code = process.wait()
             if cancel_event.is_set():
+                stop_process(process)
                 raise MediaCompileCanceled("Canceled by user.")
         finally:
             self._set_active_process(job_id, None)
@@ -774,6 +824,12 @@ class MediaCompileManager:
                 job.mkv_filename = str(kwargs["mkv_filename"])
             if "output_file_path" in kwargs and kwargs["output_file_path"]:
                 job.output_file_path = str(kwargs["output_file_path"])
+            if "staging_directory" in kwargs:
+                job.staging_directory = str(kwargs["staging_directory"]) if kwargs["staging_directory"] else None
+            if "staged_output_file_path" in kwargs:
+                job.staged_output_file_path = (
+                    str(kwargs["staged_output_file_path"]) if kwargs["staged_output_file_path"] else None
+                )
             if "verification" in kwargs and kwargs["verification"] is not None:
                 job.verification = kwargs["verification"]
 
@@ -846,6 +902,11 @@ class MediaCompileManager:
                     job.transfer.bytes_done = job.transfer.bytes_total
                 job.transfer.percent = 100.0
                 job.transfer.eta_seconds = 0
+                self._cleanup_staging_directory(job)
+            else:
+                self._cleanup_staging_directory(job)
+            job.staged_output_file_path = None
+            job.staging_directory = None
             job.transfer.paused = False
             job.transfer.speed_bps = None
             job.touch()

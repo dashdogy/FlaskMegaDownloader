@@ -4,5 +4,10 @@ __pycache__/
 *.pyd
 .venv/
 data/jobs.json
+data/jobs.json.*
+data/*.sqlite3
+data/*.sqlite3-*
 downloads/
 tmp_service_probe/
+pause-smoke-*/
+rollback-smoke-*/

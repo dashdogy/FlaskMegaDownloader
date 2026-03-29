@@ -32,7 +32,7 @@ Supported LXC guest OS versions:
 
 - Server-rendered Flask app with a Homepage-inspired soft card UI
 - Multi-link submission with whitespace trimming, blank-line removal, and per-batch deduplication
-- Background worker thread with persisted JSON job history
+- Background worker threads with SQLite-backed persisted state
 - Real `mega-get` support via MEGAcmd, plus an explicit fake backend for development only
 - Separate Blu-ray remux queue using MakeMKV CLI plus MediaInfo verification
 - Polling JSON API for live status updates every 1500 ms
@@ -45,11 +45,14 @@ Supported LXC guest OS versions:
 ## Project Layout
 
 - `app.py`: app factory, routes, filters
+- `server.py`: Waitress launcher that reads host/port from app config
 - `models.py`: dataclasses for jobs and explorer entries
 - `downloader.py`: queue manager plus MEGAcmd/fake adapters
+- `media_compiler.py`: Blu-ray scan, remux, and verification queue
 - `archives.py`: secure ZIP extraction helpers
 - `explorer.py`: safe file browser helpers
-- `storage.py`: JSON persistence
+- `process_utils.py`: shared subprocess shutdown helpers
+- `storage.py`: SQLite state storage plus one-time `jobs.json` migration
 - `templates/`: dashboard and explorer views
 - `static/`: CSS and polling UI logic
 
@@ -93,7 +96,14 @@ Useful environment variables:
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
 
+Useful config keys:
+
+- `STATE_DB_FILE`: primary SQLite runtime state path
+- `JOB_STORAGE_FILE`: legacy JSON migration source for first boot after upgrade
+
 Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
+
+Runtime state now lives in `STATE_DB_FILE` as SQLite. On first boot after upgrading, the app imports the legacy `jobs.json` automatically if present, then renames it so the migration is not retried. A corrupt legacy JSON file is quarantined and the app starts with empty state instead of crashing.
 
 ## Real MEGA Integration
 
@@ -151,6 +161,7 @@ The included [`flask-mega-downloader.service`](/c:/Users/mkrbl/Documents/VSCODE/
 - `WorkingDirectory=/opt/flask-mega-downloader`
 - `MEGA_DOWNLOADER_CONFIG=/etc/flask-mega-downloader/config.py`
 - `HOME=/var/www`
+- `/opt/flask-mega-downloader/server.py` as the Waitress launcher, so `HOST` and `PORT` come from app config instead of being duplicated in the unit file
 
 Useful recovery commands:
 

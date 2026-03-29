@@ -429,7 +429,7 @@ prompt_mega_login() {
 }
 
 print_summary() {
-  local app_host app_port lan_ip service_listen
+  local app_host app_port lan_ip
 
   readarray -t config_values < <(python3 - "${CONFIG_FILE}" <<'PY'
 from importlib.util import module_from_spec, spec_from_file_location
@@ -445,12 +445,6 @@ PY
 
   app_host="${config_values[0]:-0.0.0.0}"
   app_port="${config_values[1]:-${DEFAULT_LISTEN_PORT}}"
-  if [[ -f "${SERVICE_DEST}" ]]; then
-    service_listen="$(grep -oE -- '--listen=[^ ]+' "${SERVICE_DEST}" | head -n 1 || true)"
-    if [[ -n "${service_listen}" ]]; then
-      app_port="${service_listen##*:}"
-    fi
-  fi
   lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   lan_ip="${lan_ip:-127.0.0.1}"
 

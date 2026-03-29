@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import random
@@ -23,11 +24,13 @@ import pyzipper
 
 from explorer import normalize_destinations, normalize_user_path_input, path_within_root, relative_to_root, resolve_absolute_input_path
 from models import ACTIVE_JOB_STATUSES, FavoriteDestination, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
+from process_utils import stop_process
 from storage import JsonStorage
 
 
 ProgressCallback = Callable[..., None]
 ProcessCallback = Callable[[subprocess.Popen | None], None]
+LOGGER = logging.getLogger(__name__)
 
 
 SIZE_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)(?:/s)?", re.IGNORECASE)
@@ -574,14 +577,7 @@ class MegaDownloader:
         return metadata
 
     def _terminate_process(self, process: subprocess.Popen) -> None:
-        if process.poll() is not None:
-            return
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+        stop_process(process)
 
     def download(
         self,
@@ -953,6 +949,9 @@ class DownloadManager:
             cancel_event.set()
         for pause_event in self._pause_events.values():
             pause_event.clear()
+        with self._lock:
+            for process in list(self._active_processes.values()):
+                stop_process(process)
 
     def has_destinations(self) -> bool:
         return bool(self.destinations)
@@ -1123,7 +1122,7 @@ class DownloadManager:
                 "created": True,
             }
 
-    def delete_destination(self, destination_key: str) -> dict:
+    def delete_destination(self, destination_key: str, *, extra_in_use: bool = False) -> dict:
         with self._lock:
             if destination_key not in self.destinations:
                 raise ValueError(f"Unknown destination '{destination_key}'.")
@@ -1134,6 +1133,8 @@ class DownloadManager:
                 for job in self._jobs.values()
             ):
                 raise ValueError("That destination is still in use by a queued, paused, or active job.")
+            if extra_in_use:
+                raise ValueError("That destination is still in use by a queued or active Blu-ray job.")
 
             destination = self.destinations[destination_key]
             if destination_key in self.favorite_destinations:
@@ -1199,7 +1200,7 @@ class DownloadManager:
         self._cancel_active_mega_downloads()
         process = self._active_processes.get(job_id)
         if process and process.poll() is None:
-            process.terminate()
+            stop_process(process)
         return job
 
     def _has_live_runtime_locked(self, job_id: str) -> bool:
@@ -1583,41 +1584,52 @@ class DownloadManager:
             except Empty:
                 continue
 
-            with self._lock:
-                job = self._jobs.get(job_id)
-                if not job or job.status != "queued":
-                    continue
-                cancel_event = self._cancel_events[job_id] = threading.Event()
-                pause_event = self._pause_events[job_id] = threading.Event()
-                self._progress_samples[job_id] = (time.monotonic(), 0, None)
-                job.status = "starting"
-                job.error = None
-                job.transfer.paused = False
-                job.transfer.started_at = utcnow_iso()
-                job.transfer.finished_at = None
-                job.touch()
-                destination_dir, _, _ = self.resolve_destination(
-                    job.destination_key,
-                    job.destination_path if job.destination_is_custom else job.destination_relative_path,
-                )
-                destination_dir.mkdir(parents=True, exist_ok=True)
-                self._persist_locked(force=True)
-
             try:
-                self.adapter.download(
-                    job=job,
-                    destination_dir=destination_dir,
-                    progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
-                    cancel_event=cancel_event,
-                    pause_event=pause_event,
-                    process_callback=lambda process: self._set_active_process(job.id, process),
-                )
-            except DownloadCanceled as exc:
-                self._finish_job(job.id, status="canceled", error=str(exc))
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if not job or job.status != "queued":
+                        continue
+                    cancel_event = self._cancel_events[job_id] = threading.Event()
+                    pause_event = self._pause_events[job_id] = threading.Event()
+                    self._progress_samples[job_id] = (time.monotonic(), 0, None)
+                    job.status = "starting"
+                    job.error = None
+                    job.transfer.paused = False
+                    job.transfer.started_at = utcnow_iso()
+                    job.transfer.finished_at = None
+                    job.touch()
+                    destination_dir, _, _ = self.resolve_destination(
+                        job.destination_key,
+                        job.destination_path if job.destination_is_custom else job.destination_relative_path,
+                    )
+                    destination_dir.mkdir(parents=True, exist_ok=True)
+                    self._persist_locked(force=True)
+
+                final_status = "completed"
+                final_error: str | None = None
+                try:
+                    self.adapter.download(
+                        job=job,
+                        destination_dir=destination_dir,
+                        progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
+                        cancel_event=cancel_event,
+                        pause_event=pause_event,
+                        process_callback=lambda process: self._set_active_process(job.id, process),
+                    )
+                except DownloadCanceled as exc:
+                    final_status = "canceled"
+                    final_error = str(exc)
+                except Exception as exc:
+                    final_status = "failed"
+                    final_error = str(exc)
+
+                self._finish_job(job.id, status=final_status, error=final_error)
             except Exception as exc:
-                self._finish_job(job.id, status="failed", error=str(exc))
-            else:
-                self._finish_job(job.id, status="completed", error=None)
+                LOGGER.exception("Download worker failed while handling job %s", job_id)
+                try:
+                    self._finish_job(job_id, status="failed", error=str(exc))
+                except Exception:
+                    LOGGER.exception("Download worker could not persist failure state for job %s", job_id)
             finally:
                 with self._lock:
                     self._cancel_events.pop(job_id, None)

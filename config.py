@@ -13,6 +13,7 @@ PORT = int(os.environ.get("MEGA_DOWNLOADER_PORT", "8090"))
 POLL_INTERVAL_MS = int(os.environ.get("MEGA_DOWNLOADER_POLL_INTERVAL_MS", "1500"))
 
 JOB_STORAGE_FILE = DATA_DIR / "jobs.json"
+STATE_DB_FILE = DATA_DIR / "state.sqlite3"
 MEGACMD_BINARY = os.environ.get("MEGACMD_BINARY", "mega-get")
 DOWNLOADER_BACKEND = os.environ.get("MEGA_DOWNLOADER_BACKEND", "auto")
 MAKEMKVCON_BINARY = os.environ.get("MAKEMKVCON_BINARY", "makemkvcon")

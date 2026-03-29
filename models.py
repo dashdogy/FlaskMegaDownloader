@@ -207,6 +207,8 @@ class MediaJob:
     output_destination_relative_path: str = ""
     output_destination_is_custom: bool = False
     output_file_path: str | None = None
+    staging_directory: str | None = None
+    staged_output_file_path: str | None = None
     mkv_filename: str | None = None
     title_id: int | None = None
     title_name: str | None = None
@@ -251,6 +253,8 @@ class MediaJob:
             output_destination_relative_path=data.get("output_destination_relative_path", ""),
             output_destination_is_custom=bool(data.get("output_destination_is_custom", False)),
             output_file_path=data.get("output_file_path"),
+            staging_directory=data.get("staging_directory"),
+            staged_output_file_path=data.get("staged_output_file_path"),
             mkv_filename=data.get("mkv_filename"),
             title_id=data.get("title_id"),
             title_name=data.get("title_name"),

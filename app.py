@@ -5,6 +5,7 @@ import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 
@@ -93,13 +94,24 @@ def create_app() -> Flask:
     app.jinja_env.filters["filesize"] = format_bytes
     app.jinja_env.filters["datetime_local"] = format_datetime
 
+    if (
+        Path(app.config["STATE_DB_FILE"]) == default_config.STATE_DB_FILE
+        and Path(app.config["JOB_STORAGE_FILE"]).parent != default_config.JOB_STORAGE_FILE.parent
+    ):
+        app.config["STATE_DB_FILE"] = Path(app.config["JOB_STORAGE_FILE"]).with_name("state.sqlite3")
+
+    app.config["STATE_DB_FILE"] = Path(app.config["STATE_DB_FILE"]).expanduser().resolve()
     app.config["JOB_STORAGE_FILE"] = Path(app.config["JOB_STORAGE_FILE"]).expanduser().resolve()
     for destination in app.config["ALLOWED_DESTINATIONS"].values():
         destination["path"] = Path(destination["path"]).expanduser().resolve()
         destination["path"].mkdir(parents=True, exist_ok=True)
+    app.config["STATE_DB_FILE"].parent.mkdir(parents=True, exist_ok=True)
     app.config["JOB_STORAGE_FILE"].parent.mkdir(parents=True, exist_ok=True)
 
-    storage = JsonStorage(app.config["JOB_STORAGE_FILE"])
+    storage = JsonStorage(
+        app.config["STATE_DB_FILE"],
+        legacy_json_path=app.config["JOB_STORAGE_FILE"],
+    )
     manager = DownloadManager(
         storage=storage,
         destinations=app.config["ALLOWED_DESTINATIONS"],
@@ -120,6 +132,16 @@ def create_app() -> Flask:
     def explorer_redirect(root_key: str, current_path: str, sort_by: str):
         return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
 
+    def redirect_back_or(fallback_endpoint: str = "dashboard", **fallback_values):
+        referrer = request.referrer
+        if referrer:
+            parsed = urlsplit(referrer)
+            current = urlsplit(request.host_url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc == current.netloc:
+                safe_path = parsed.path or "/"
+                return redirect(urlunsplit(("", "", safe_path, parsed.query, "")))
+        return redirect(url_for(fallback_endpoint, **fallback_values))
+
     def post_context_redirect(fallback_endpoint: str = "dashboard"):
         root_key = request.form.get("root")
         if root_key:
@@ -128,7 +150,7 @@ def create_app() -> Flask:
                 request.form.get("current_path", ""),
                 request.form.get("sort", "name"),
             )
-        return redirect(request.referrer or url_for(fallback_endpoint))
+        return redirect_back_or(fallback_endpoint)
 
     def destination_label_lookup() -> dict[str, str]:
         return {item["key"]: item["label"] for item in manager.destination_options()}
@@ -314,11 +336,14 @@ def create_app() -> Flask:
     @app.post("/destinations/<destination_key>/delete")
     def delete_destination(destination_key: str):
         try:
-            deleted = manager.delete_destination(destination_key)
+            deleted = manager.delete_destination(
+                destination_key,
+                extra_in_use=media_manager.destination_in_use(destination_key),
+            )
             flash(f"Deleted {deleted['type']} destination: {deleted['label']}.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/destinations/restore")
     def restore_destinations():
@@ -327,7 +352,7 @@ def create_app() -> Flask:
             flash(f"Restored {restored} configured destination(s).", "success")
         else:
             flash("There were no hidden configured destinations to restore.", "success")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.get("/api/jobs")
     def api_jobs():
@@ -340,7 +365,7 @@ def create_app() -> Flask:
             flash("Cancel request sent.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/<job_id>/retry")
     def retry_job(job_id: str):
@@ -349,7 +374,7 @@ def create_app() -> Flask:
             flash("Job re-queued.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/media-jobs/<job_id>/cancel")
     def cancel_media_job(job_id: str):
@@ -358,7 +383,7 @@ def create_app() -> Flask:
             flash("Blu-ray cancel request sent.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/media-jobs/<job_id>/retry")
     def retry_media_job(job_id: str):
@@ -367,7 +392,7 @@ def create_app() -> Flask:
             flash("Blu-ray job re-queued.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/<job_id>/pause")
     def pause_job(job_id: str):
@@ -376,7 +401,7 @@ def create_app() -> Flask:
             flash("Pause request sent.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/<job_id>/resume")
     def resume_job(job_id: str):
@@ -385,7 +410,7 @@ def create_app() -> Flask:
             flash("Resume request sent.", "success")
         except ValueError as exc:
             flash(str(exc), "error")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/clear")
     def clear_queue():
@@ -400,14 +425,14 @@ def create_app() -> Flask:
         if not messages:
             messages.append("Queue was already empty.")
         flash(" ".join(messages), "success")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/toggle-all")
     def toggle_all_jobs():
         toggle = manager.bulk_pause_toggle()
         if not toggle["available"]:
             flash("There were no queued, active, or paused jobs to change.", "success")
-            return redirect(request.referrer or url_for("dashboard"))
+            return redirect_back_or("dashboard")
 
         if toggle["action"] == "pause":
             result = manager.pause_all()
@@ -415,7 +440,7 @@ def create_app() -> Flask:
         else:
             result = manager.resume_all()
             flash(f"Resumed {result['resumed']} paused job(s).", "success")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.post("/jobs/sort")
     def sort_jobs():
@@ -424,13 +449,13 @@ def create_app() -> Flask:
             result = manager.sort_queue(sort_by)
         except ValueError as exc:
             flash(str(exc), "error")
-            return redirect(request.referrer or url_for("dashboard"))
+            return redirect_back_or("dashboard")
 
         if result["sorted"]:
             flash(f"Sorted {result['sorted']} queued job(s) by {result['label']}.", "success")
         else:
             flash("There were no queued jobs to sort.", "success")
-        return redirect(request.referrer or url_for("dashboard"))
+        return redirect_back_or("dashboard")
 
     @app.get("/explorer")
     def explorer():
