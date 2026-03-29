@@ -17,6 +17,7 @@ The helper script is idempotent:
 - First run installs the app into `/opt/flask-mega-downloader`
 - Later runs update the managed checkout from GitHub, refresh the virtualenv, reinstall the systemd unit, and restart the service
 - `/etc/flask-mega-downloader/config.py` is created only once and then preserved across updates
+- Existing helper-generated configs that still use the old default `PORT = 8080` are migrated to `8090` on rerun
 - MEGAcmd is installed from MEGA's official APT repo and the script prompts for `mega-login` if `www-data` is not already signed in
 - `mediainfo` is installed automatically and the helper makes a best-effort attempt to build and install MakeMKV CLI from the official MakeMKV download site
 - If MakeMKV still needs manual registration, beta-key activation, or a manual fix, the helper warns and finishes without failing the whole app install

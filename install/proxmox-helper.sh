@@ -303,8 +303,26 @@ setup_python_env() {
 }
 
 write_default_config() {
+  local port_update_result
+
   if [[ -f "${CONFIG_FILE}" ]]; then
     log "Keeping existing config at ${CONFIG_FILE}."
+    port_update_result="$(python3 - "${CONFIG_FILE}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+config_path = Path(sys.argv[1])
+content = config_path.read_text(encoding="utf-8")
+updated = re.sub(r"(?m)^PORT\s*=\s*8080\s*$", "PORT = 8090", content, count=1)
+if updated != content:
+    config_path.write_text(updated, encoding="utf-8")
+    print("updated-port")
+PY
+)"
+    if [[ "${port_update_result}" == "updated-port" ]]; then
+      log "Updated legacy default port in ${CONFIG_FILE} from 8080 to 8090."
+    fi
     chmod 0644 "${CONFIG_FILE}"
     return
   fi
