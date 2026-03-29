@@ -1,6 +1,6 @@
 # Flask Mega Downloader
 
-Lightweight Flask UI for queueing public MEGA links to configured local folders, monitoring transfer status over JSON polling, browsing only approved download roots, extracting normal or AES-encrypted ZIP archives safely, and remuxing decrypted Blu-ray folder backups into MKV files.
+Lightweight Flask UI for queueing public MEGA links to configured local folders, monitoring transfer status over JSON polling, browsing only approved download roots, extracting ZIP, RAR, and 7Z archives safely, and remuxing decrypted Blu-ray folder backups into MKV files.
 
 ## Proxmox LXC Install Or Update
 
@@ -40,6 +40,8 @@ Supported LXC guest OS versions:
 - Polling JSON API for live status updates every 1500 ms
 - Safe file explorer rooted inside configured destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
+- RAR extraction with `rarfile` plus a local backend such as `unar`, `unrar`, or `7z`
+- 7Z extraction, including `.7z.001` split-volume entrypoints, through the local `7z` binary
 - Explorer-driven Blu-ray remux submission for BDMV folder backups only
 - Pause, resume, cancel, and retry job actions
 - Custom destination paths, including a saved favorites list for paths you reuse
@@ -51,7 +53,7 @@ Supported LXC guest OS versions:
 - `models.py`: dataclasses for jobs and explorer entries
 - `downloader.py`: queue manager plus MEGAcmd/fake adapters
 - `media_compiler.py`: Blu-ray scan, remux, and verification queue
-- `archives.py`: secure ZIP extraction helpers
+- `archives.py`: secure ZIP, RAR, and 7Z extraction helpers
 - `explorer.py`: safe file browser helpers
 - `process_utils.py`: shared subprocess shutdown helpers
 - `storage.py`: SQLite state storage plus one-time `jobs.json` migration
@@ -94,6 +96,7 @@ Useful environment variables:
 - `MEGACMD_BINARY`: override the `mega-get` executable name/path
 - `MAKEMKVCON_BINARY`: override the `makemkvcon` executable name/path
 - `MEDIAINFO_BINARY`: override the `mediainfo` executable name/path
+- `SEVEN_ZIP_BINARY`: override the `7z` executable name/path used for 7Z extraction
 - `MEGA_DOWNLOADER_BLURAY_MIN_TITLE_SECONDS`: minimum title length used when auto-selecting the main feature
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
@@ -133,10 +136,11 @@ runuser -u www-data -- env HOME=/var/www mega-whoami
 
 In `auto` mode the app uses MEGAcmd when `mega-get` is available. If it is missing, submissions are rejected with a clear error instead of silently generating fake files. Use `MEGA_DOWNLOADER_BACKEND=fake` only when you intentionally want the simulator for UI testing.
 
-Example fake ZIP URLs for local testing:
+Example fake archive URLs for local testing:
 
 - `https://example.local/sample.zip`
 - `https://example.local/encrypted.zip?pw=secret123`
+- `https://example.local/archive.7z`
 
 ## Blu-ray Remux
 
@@ -180,5 +184,5 @@ mediainfo --Version
 ## Security Notes
 
 - Explorer navigation is restricted with `Path.resolve()` checks under configured roots only.
-- Archive extraction validates every output path before writing to prevent zip slip.
+- Archive extraction validates every output path before writing to prevent path traversal and zip slip style issues, including staged 7Z extraction.
 - Download commands use argument lists, not shell expansion.

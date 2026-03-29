@@ -64,7 +64,7 @@ apt_install_base() {
   export DEBIAN_FRONTEND=noninteractive
   log "Installing base packages."
   apt-get update
-  apt-get install -y ca-certificates curl git gnupg python3 python3-venv python3-pip
+  apt-get install -y ca-certificates curl git gnupg python3 python3-venv python3-pip unar p7zip-full
 }
 
 strip_mega_lines_from_list() {

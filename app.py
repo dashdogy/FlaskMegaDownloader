@@ -10,7 +10,13 @@ from urllib.parse import urlsplit, urlunsplit
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 
 import config as default_config
-from archives import ArchiveError, extract_archive
+from archives import (
+    ArchiveError,
+    archive_type_for_path,
+    default_archive_target_name,
+    extract_archive,
+    is_supported_archive_path,
+)
 from downloader import DownloadManager, ensure_destination_writable
 from explorer import (
     delete_entries,
@@ -237,7 +243,7 @@ def create_app() -> Flask:
         *,
         password: str | None = None,
         target_dir_name: str | None = None,
-        skip_non_zip: bool,
+        skip_non_archive: bool,
     ) -> dict:
         root_info, _, resolved_entries = resolve_entries_in_directory(
             manager.destinations,
@@ -254,20 +260,26 @@ def create_app() -> Flask:
             target_dir_name = validate_entry_name(target_dir_name)
 
         for relative_path, entry_path in resolved_entries:
-            if entry_path.suffix.lower() != ".zip" or not entry_path.is_file():
-                if skip_non_zip:
+            archive_type = archive_type_for_path(entry_path)
+            if not is_supported_archive_path(entry_path):
+                if skip_non_archive:
                     skipped.append(Path(relative_path).name)
                     continue
-                raise ArchiveError("Only zip files inside an allowed root can be extracted.")
+                raise ArchiveError("Only zip, rar, and 7z files inside an allowed root can be extracted.")
 
             if target_dir_name:
                 target_relative = str(Path(relative_path).parent / target_dir_name)
             else:
-                target_relative = str(Path(relative_path).with_suffix(""))
+                target_relative = str(Path(relative_path).parent / default_archive_target_name(entry_path))
             target_dir = path_within_root(root, target_relative)
 
             try:
-                extracted_files = extract_archive(entry_path, target_dir, password=password)
+                extracted_files = extract_archive(
+                    entry_path,
+                    target_dir,
+                    password=password,
+                    seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
+                )
             except ArchiveError as exc:
                 failures.append(f"{entry_path.name}: {exc}")
                 continue
@@ -275,6 +287,7 @@ def create_app() -> Flask:
             extracted.append(
                 {
                     "archive": entry_path.name,
+                    "archive_type": archive_type,
                     "target": target_dir.name,
                     "count": len(extracted_files),
                 }
@@ -568,7 +581,7 @@ def create_app() -> Flask:
                 current_path,
                 selected_paths,
                 password=password,
-                skip_non_zip=True,
+                skip_non_archive=True,
             )
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
@@ -582,7 +595,10 @@ def create_app() -> Flask:
                 "success",
             )
         if result["skipped"]:
-            flash(f"Skipped {len(result['skipped'])} non-zip item(s): {summarize_items(result['skipped'])}.", "success")
+            flash(
+                f"Skipped {len(result['skipped'])} non-archive item(s): {summarize_items(result['skipped'])}.",
+                "success",
+            )
         if result["failures"]:
             flash(
                 f"Failed to extract {len(result['failures'])} archive(s): {summarize_items(result['failures'])}.",
@@ -767,7 +783,7 @@ def create_app() -> Flask:
                 [archive_rel],
                 password=password,
                 target_dir_name=target_dir_name or None,
-                skip_non_zip=False,
+                skip_non_archive=False,
             )
             if result["extracted"]:
                 extracted = result["extracted"][0]

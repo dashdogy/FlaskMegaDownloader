@@ -18,6 +18,7 @@ MEGACMD_BINARY = os.environ.get("MEGACMD_BINARY", "mega-get")
 DOWNLOADER_BACKEND = os.environ.get("MEGA_DOWNLOADER_BACKEND", "auto")
 MAKEMKVCON_BINARY = os.environ.get("MAKEMKVCON_BINARY", "makemkvcon")
 MEDIAINFO_BINARY = os.environ.get("MEDIAINFO_BINARY", "mediainfo")
+SEVEN_ZIP_BINARY = os.environ.get("SEVEN_ZIP_BINARY", "7z")
 BLURAY_MIN_TITLE_SECONDS = int(os.environ.get("MEGA_DOWNLOADER_BLURAY_MIN_TITLE_SECONDS", "2400"))
 
 ALLOWED_DESTINATIONS = {

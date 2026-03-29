@@ -122,17 +122,17 @@
                     <div class="explorer-tool-head">
                         <p class="eyebrow">Archive And Delete</p>
                         <h3>Work with the current selection</h3>
-                        <p class="subtle">Use one shared password for ZIP extraction, or remove the selected items entirely.</p>
+                        <p class="subtle">Use one shared password for ZIP, RAR, or 7Z extraction, or remove the selected items entirely.</p>
                     </div>
                     <div class="explorer-field-grid">
                         <div class="explorer-field explorer-field-wide">
-                            <label for="bulk-zip-password">Shared zip password</label>
-                            <input id="bulk-zip-password" type="password" name="password" placeholder="Optional password for encrypted ZIP files">
-                            <p class="explorer-field-help">Leave this blank for normal ZIP archives.</p>
+                            <label for="bulk-zip-password">Shared archive password</label>
+                            <input id="bulk-zip-password" type="password" name="password" placeholder="Optional password for encrypted ZIP, RAR, or 7Z files">
+                            <p class="explorer-field-help">Leave this blank for normal ZIP, RAR, or 7Z archives.</p>
                         </div>
                     </div>
                     <div class="explorer-tool-actions">
-                        <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Zips</button>
+                        <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Archives</button>
                         <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-selection-action disabled>Delete Selected</button>
                     </div>
                 </section>
@@ -248,14 +248,14 @@
                                     <div class="entry-actions">
                                         {% if entry.is_dir %}
                                             <a class="ghost-button" href="{{ url_for('explorer', root=explorer.root.key, path=entry.relative_path, sort=explorer.sort) }}">Open Folder</a>
-                                        {% elif entry.is_zip %}
+                                        {% elif entry.is_archive %}
                                             <form action="{{ url_for('unzip') }}" method="post" class="unzip-form">
                                                 <input type="hidden" name="root" value="{{ explorer.root.key }}">
                                                 <input type="hidden" name="sort" value="{{ explorer.sort }}">
                                                 <input type="hidden" name="archive_path" value="{{ entry.relative_path }}">
                                                 <input type="text" name="target_dir" placeholder="Extract folder">
                                                 <input type="password" name="password" placeholder="Password if needed">
-                                                <button type="submit">Unzip</button>
+                                                <button type="submit">Extract {{ entry.archive_type.upper() if entry.archive_type else "Archive" }}</button>
                                             </form>
                                         {% endif %}
                                     </div>

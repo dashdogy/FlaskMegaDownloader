@@ -16,7 +16,7 @@ JOB_STATUSES = {
 }
 
 ACTIVE_JOB_STATUSES = {"starting", "probing", "downloading"}
-RETRYABLE_JOB_STATUSES = {"completed", "failed", "canceled"}
+RETRYABLE_JOB_STATUSES = {"failed", "canceled"}
 
 MEDIA_JOB_STATUSES = {
     "queued",
@@ -128,6 +128,8 @@ class ExplorerEntry:
     size: int | None
     modified_at: str | None
     is_zip: bool = False
+    is_archive: bool = False
+    archive_type: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

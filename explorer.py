@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PureWindowsPath
 
+from archives import archive_type_for_path
 from models import ExplorerEntry
 
 
@@ -340,6 +341,7 @@ def list_directory(
     for child in current_path.iterdir():
         stats = child.stat()
         modified_at = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).astimezone().isoformat()
+        archive_type = archive_type_for_path(child) if child.is_file() else None
         entries.append(
             ExplorerEntry(
                 name=child.name,
@@ -347,7 +349,9 @@ def list_directory(
                 is_dir=child.is_dir(),
                 size=None if child.is_dir() else stats.st_size,
                 modified_at=modified_at,
-                is_zip=child.is_file() and child.suffix.lower() == ".zip",
+                is_zip=archive_type == "zip",
+                is_archive=archive_type is not None,
+                archive_type=archive_type,
             )
         )
 
