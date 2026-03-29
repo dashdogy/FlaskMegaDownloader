@@ -14,7 +14,10 @@
     const saveDestinationButton = bulkForm.querySelector("[data-save-destination]");
     const moveTargetInput = document.getElementById("move-target-path");
     const savedMoveTargetSelect = document.getElementById("saved-move-target");
+    const savedMoveTargetPreview = document.getElementById("saved-move-target-preview");
+    const compileDestinationSelect = document.getElementById("compile-destination");
     const compileDestinationInput = document.getElementById("compile-destination-path");
+    const compileDestinationPreview = document.getElementById("compile-destination-preview");
 
     const updateSelectionUi = () => {
         const selectedCount = entryCheckboxes.filter((checkbox) => checkbox.checked).length;
@@ -23,7 +26,13 @@
         const hasDestinationPath = Boolean(compileDestinationInput?.value.trim());
 
         if (selectionCount) {
-            selectionCount.textContent = `${selectedCount} selected`;
+            if (selectedCount === 0) {
+                selectionCount.textContent = "No items selected";
+            } else if (selectedCount === 1) {
+                selectionCount.textContent = "1 item selected";
+            } else {
+                selectionCount.textContent = `${selectedCount} items selected`;
+            }
         }
 
         for (const button of selectionButtons) {
@@ -45,6 +54,25 @@
         if (compileButton) {
             const compileLocked = compileButton.dataset.locked === "true";
             compileButton.disabled = compileLocked || selectedCount === 0;
+        }
+
+        if (savedMoveTargetPreview && savedMoveTargetSelect) {
+            const selectedOption = savedMoveTargetSelect.selectedOptions[0];
+            const selectedPath = selectedOption?.dataset.path || selectedOption?.value || "";
+            savedMoveTargetPreview.textContent = selectedPath || "Choose a saved target to copy its path here.";
+        }
+
+        if (compileDestinationPreview && compileDestinationSelect) {
+            const selectedOption = compileDestinationSelect.selectedOptions[0];
+            const basePath = selectedOption?.dataset.path || "";
+            const customPath = compileDestinationInput?.value.trim();
+            if (customPath) {
+                compileDestinationPreview.textContent = `Base path: ${basePath}. Custom path: ${customPath}`;
+            } else if (basePath) {
+                compileDestinationPreview.textContent = `Base path: ${basePath}`;
+            } else {
+                compileDestinationPreview.textContent = "Choose an output destination.";
+            }
         }
 
         if (!selectAll) {
@@ -75,6 +103,10 @@
 
     if (compileDestinationInput) {
         compileDestinationInput.addEventListener("input", updateSelectionUi);
+    }
+
+    if (compileDestinationSelect) {
+        compileDestinationSelect.addEventListener("change", updateSelectionUi);
     }
 
     if (savedMoveTargetSelect && moveTargetInput) {

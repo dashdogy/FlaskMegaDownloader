@@ -597,47 +597,146 @@ button:disabled {
 }
 
 .move-confirmation-list,
-.move-confirmation-form,
-.explorer-bulk-meta,
-.explorer-compile-controls,
-.explorer-move-controls,
-.explorer-bulk-actions {
+.move-confirmation-form {
     display: flex;
     gap: 12px;
     align-items: center;
     flex-wrap: wrap;
 }
 
-.explorer-bulk-bar {
+.explorer-toolbar {
     display: grid;
-    gap: 12px;
-    padding: 14px 16px;
-    border-radius: 20px;
+    gap: 16px;
+    padding: 18px;
+    border-radius: 24px;
     background: rgba(240, 246, 251, 0.92);
     border: 1px solid rgba(67, 115, 157, 0.08);
 }
 
-.explorer-bulk-bar input[type="password"],
-.explorer-bulk-bar input[type="text"],
-.explorer-bulk-bar select {
-    flex: 1 1 260px;
-    min-width: 220px;
+.explorer-toolbar-summary {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
-.explorer-bulk-meta {
-    justify-content: space-between;
+.explorer-summary-card {
+    display: grid;
+    gap: 6px;
+    padding: 16px 18px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(67, 115, 157, 0.08);
 }
 
-.explorer-move-controls,
-.explorer-compile-controls,
-.explorer-bulk-actions {
+.explorer-summary-card strong {
+    color: var(--text);
+    font-size: 1.02rem;
+}
+
+.explorer-summary-card .subtle {
+    margin: 0;
+    line-height: 1.45;
+}
+
+.explorer-summary-label {
+    color: var(--muted);
+    font-size: 0.76rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.explorer-tool-grid {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.explorer-tool-card {
+    display: grid;
+    gap: 14px;
+    align-content: start;
+    padding: 18px;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.78);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.explorer-tool-head {
+    display: grid;
+    gap: 4px;
+}
+
+.explorer-tool-head h3,
+.explorer-table-header h3 {
+    margin: 0;
+}
+
+.explorer-tool-head .eyebrow {
+    margin-bottom: 0;
+}
+
+.explorer-tool-head .subtle,
+.explorer-table-header .subtle {
+    margin: 0;
+    line-height: 1.5;
+}
+
+.explorer-field-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.explorer-field {
+    display: grid;
+    gap: 8px;
+}
+
+.explorer-field-wide {
+    grid-column: 1 / -1;
+}
+
+.explorer-field label {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.explorer-field input,
+.explorer-field select {
+    width: 100%;
+}
+
+.explorer-field-help {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.84rem;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+.explorer-tool-actions {
+    display: flex;
+    gap: 10px;
     align-items: stretch;
+    flex-wrap: wrap;
+    margin-top: auto;
 }
 
-.explorer-compile-controls button,
-.explorer-move-controls button,
-.explorer-bulk-actions button {
+.explorer-tool-actions > * {
+    flex: 1 1 180px;
+}
+
+.explorer-tool-actions button {
+    width: 100%;
     white-space: nowrap;
+}
+
+.explorer-table-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
 }
 
 .selection-cell {
@@ -743,16 +842,17 @@ button:disabled {
     }
 
     .move-confirmation-form > *,
-    .explorer-bulk-meta > *,
-    .explorer-compile-controls > *,
-    .explorer-move-controls > *,
-    .explorer-bulk-actions > * {
+    .explorer-tool-actions > * {
         width: 100%;
     }
 
     .move-confirmation-form button,
-    .explorer-bulk-bar button {
+    .explorer-toolbar button {
         text-align: center;
+    }
+
+    .explorer-field-grid {
+        grid-template-columns: 1fr;
     }
 }
 
@@ -772,9 +872,7 @@ button:disabled {
     }
 
     .rename-form input,
-    .explorer-compile-controls button,
-    .explorer-move-controls button,
-    .explorer-bulk-actions button,
+    .explorer-tool-actions button,
     .unzip-form button,
     .rename-form button {
         width: 100%;

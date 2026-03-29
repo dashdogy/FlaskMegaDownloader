@@ -67,69 +67,141 @@
         <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
         <input type="hidden" name="sort" value="{{ explorer.sort }}">
 
-        <div class="explorer-bulk-bar">
-            <div class="explorer-bulk-meta">
-                <span class="subtle" id="selection-count">0 selected</span>
-                <span class="subtle">
-                    Blu-ray backend:
-                    <strong>{{ media_backend.label }}</strong>
-                    {% if media_backend.reason %} - {{ media_backend.reason }}{% endif %}
-                </span>
+        <div class="explorer-toolbar">
+            <div class="explorer-toolbar-summary">
+                <div class="explorer-summary-card">
+                    <span class="explorer-summary-label">Selection</span>
+                    <strong id="selection-count">No items selected</strong>
+                    <p class="subtle">Select files or folders below to use bulk actions.</p>
+                </div>
+                <div class="explorer-summary-card">
+                    <span class="explorer-summary-label">Current Folder</span>
+                    <strong>{{ explorer.current_label or explorer.root.label }}</strong>
+                    <p class="subtle">{{ explorer.entries|length }} visible item(s) in this view.</p>
+                </div>
             </div>
-            <div class="explorer-compile-controls">
-                <select id="compile-destination" name="destination" aria-label="Compile output destination">
-                    {% for destination in destinations %}
-                        <option value="{{ destination.key }}">{{ destination.label }} - {{ destination.path }}</option>
-                    {% endfor %}
-                </select>
-                <input
-                    type="text"
-                    id="compile-destination-path"
-                    name="destination_path"
-                    placeholder="Compile output subfolder or full path"
-                    aria-label="Compile output path"
-                >
-                <button
-                    type="submit"
-                    formaction="{{ url_for('add_favorite') }}"
-                    class="secondary-button"
-                    data-save-destination
-                    disabled
-                >
-                    Add To Favorites
-                </button>
-                <button
-                    type="submit"
-                    formaction="{{ url_for('explorer_compile_bluray') }}"
-                    class="secondary-button"
-                    data-compile-action
-                    {% if not media_backend.available %}disabled{% endif %}
-                >
-                    Compile Selected Blu-rays
-                </button>
+
+            <div class="explorer-tool-grid">
+                <section class="explorer-tool-card">
+                    <div class="explorer-tool-head">
+                        <p class="eyebrow">Move</p>
+                        <h3>Move selected items</h3>
+                        <p class="subtle">Pick a saved target or type a relative path inside this root, or a full path on another disk.</p>
+                    </div>
+                    <div class="explorer-field-grid">
+                        <div class="explorer-field">
+                            <label for="saved-move-target">Saved move target</label>
+                            <select id="saved-move-target" aria-label="Saved move targets">
+                                <option value="">Choose a saved target</option>
+                                {% for favorite in move_favorites %}
+                                    <option value="{{ favorite.path }}" data-path="{{ favorite.path }}">{{ favorite.label }}</option>
+                                {% endfor %}
+                            </select>
+                            <p class="explorer-field-help" id="saved-move-target-preview">Choose a saved target to copy its path here.</p>
+                        </div>
+                        <div class="explorer-field explorer-field-wide">
+                            <label for="move-target-path">Move target path</label>
+                            <input
+                                type="text"
+                                id="move-target-path"
+                                name="move_target"
+                                value="{{ move_confirmation.target_input if move_confirmation else '' }}"
+                                placeholder="Example: movies/archive or /mnt/storage/movies"
+                                aria-label="Move target path"
+                            >
+                            <p class="explorer-field-help">The selected items keep their names when moved.</p>
+                        </div>
+                    </div>
+                    <div class="explorer-tool-actions">
+                        <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
+                        <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
+                    </div>
+                </section>
+
+                <section class="explorer-tool-card">
+                    <div class="explorer-tool-head">
+                        <p class="eyebrow">Archive And Delete</p>
+                        <h3>Work with the current selection</h3>
+                        <p class="subtle">Use one shared password for ZIP extraction, or remove the selected items entirely.</p>
+                    </div>
+                    <div class="explorer-field-grid">
+                        <div class="explorer-field explorer-field-wide">
+                            <label for="bulk-zip-password">Shared zip password</label>
+                            <input id="bulk-zip-password" type="password" name="password" placeholder="Optional password for encrypted ZIP files">
+                            <p class="explorer-field-help">Leave this blank for normal ZIP archives.</p>
+                        </div>
+                    </div>
+                    <div class="explorer-tool-actions">
+                        <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Zips</button>
+                        <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-selection-action disabled>Delete Selected</button>
+                    </div>
+                </section>
+
+                <section class="explorer-tool-card">
+                    <div class="explorer-tool-head">
+                        <p class="eyebrow">Blu-ray Remux</p>
+                        <h3>Compile selected Blu-rays</h3>
+                        <p class="subtle">
+                            <strong>{{ media_backend.label }}</strong>
+                            {% if media_backend.reason %}
+                                - {{ media_backend.reason }}
+                            {% else %}
+                                - The main feature is chosen automatically and remuxed to MKV without re-encoding.
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div class="explorer-field-grid">
+                        <div class="explorer-field">
+                            <label for="compile-destination">Output destination</label>
+                            <select id="compile-destination" name="destination" aria-label="Compile output destination">
+                                {% for destination in destinations %}
+                                    <option value="{{ destination.key }}" data-path="{{ destination.path }}">{{ destination.label }}</option>
+                                {% endfor %}
+                            </select>
+                            <p class="explorer-field-help" id="compile-destination-preview">
+                                {% if destinations %}Base path: {{ destinations[0].path }}{% else %}Choose an output destination.{% endif %}
+                            </p>
+                        </div>
+                        <div class="explorer-field explorer-field-wide">
+                            <label for="compile-destination-path">Output subfolder or full path</label>
+                            <input
+                                type="text"
+                                id="compile-destination-path"
+                                name="destination_path"
+                                placeholder="Example: remuxes/new or /mnt/media/remuxes"
+                                aria-label="Compile output path"
+                            >
+                            <p class="explorer-field-help">Add a relative subfolder under the destination above, or enter a full path for another disk.</p>
+                        </div>
+                    </div>
+                    <div class="explorer-tool-actions">
+                        <button
+                            type="submit"
+                            formaction="{{ url_for('add_favorite') }}"
+                            class="secondary-button"
+                            data-save-destination
+                            disabled
+                        >
+                            Add To Favorites
+                        </button>
+                        <button
+                            type="submit"
+                            formaction="{{ url_for('explorer_compile_bluray') }}"
+                            class="secondary-button"
+                            data-compile-action
+                            {% if not media_backend.available %}disabled{% endif %}
+                        >
+                            Compile Selected Blu-rays
+                        </button>
+                    </div>
+                </section>
             </div>
-            <div class="explorer-move-controls">
-                <select id="saved-move-target" aria-label="Saved move targets">
-                    <option value="">Saved move targets</option>
-                    {% for favorite in move_favorites %}
-                        <option value="{{ favorite.path }}">{{ favorite.label }} - {{ favorite.path }}</option>
-                    {% endfor %}
-                </select>
-                <input
-                    type="text"
-                    id="move-target-path"
-                    name="move_target"
-                    value="{{ move_confirmation.target_input if move_confirmation else '' }}"
-                    placeholder="Move target path"
-                    aria-label="Move target path"
-                >
-                <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
-                <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
-            </div>
-            <div class="explorer-bulk-actions">
-                <input type="password" name="password" placeholder="Shared zip password (optional)">
-                <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Zips</button>
-                <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-selection-action disabled>Delete Selected</button>
+        </div>
+
+        <div class="explorer-table-header">
+            <div>
+                <h3>Folder contents</h3>
+                <p class="subtle">Select items from the table, then use the action panels above.</p>
             </div>
         </div>
 
