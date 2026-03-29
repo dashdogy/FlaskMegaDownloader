@@ -24,6 +24,7 @@ from explorer import (
     resolve_move_target,
     validate_entry_name,
 )
+from filecrypt_resolver import FilecryptResolutionError, expand_submission_urls
 from media_compiler import MediaCompileManager, detect_bluray_source
 from models import MoveFavorite
 from storage import JsonStorage
@@ -80,6 +81,12 @@ def summarize_items(items: list[str], limit: int = 3) -> str:
         return ", ".join(items)
     visible = ", ".join(items[:limit])
     return f"{visible}, and {len(items) - limit} more"
+
+
+def pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    if count == 1:
+        return singular
+    return plural or f"{singular}s"
 
 
 def create_app() -> Flask:
@@ -301,7 +308,13 @@ def create_app() -> Flask:
         destination_key = request.form.get("destination", "")
         destination_subpath = normalize_destination_path_input(request.form.get("destination_path", ""))
         if not urls:
-            flash("Paste at least one MEGA URL.", "error")
+            flash("Paste at least one MEGA or Filecrypt URL.", "error")
+            return redirect(url_for("dashboard"))
+
+        try:
+            urls, resolution_summary = expand_submission_urls(urls)
+        except FilecryptResolutionError as exc:
+            flash(str(exc), "error")
             return redirect(url_for("dashboard"))
 
         try:
@@ -310,6 +323,16 @@ def create_app() -> Flask:
             flash(str(exc), "error")
             return redirect(url_for("dashboard"))
 
+        if resolution_summary.containers_resolved:
+            flash(
+                (
+                    f"Resolved {resolution_summary.containers_resolved} Filecrypt "
+                    f"{pluralize(resolution_summary.containers_resolved, 'container')} into "
+                    f"{resolution_summary.mega_links_resolved} MEGA "
+                    f"{pluralize(resolution_summary.mega_links_resolved, 'link')}."
+                ),
+                "success",
+            )
         flash(f"Queued {len(jobs)} job(s) in batch {jobs[0].batch_id}.", "success")
         return redirect(url_for("dashboard"))
 

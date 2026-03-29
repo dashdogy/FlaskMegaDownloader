@@ -5,13 +5,14 @@
     <article class="card form-card">
         <div class="section-copy">
             <p class="eyebrow">Submit Batch</p>
-            <h2>Queue one or many MEGA links</h2>
-            <p>Paste one public URL per line. Blank lines are ignored and duplicates in the same submission are removed.</p>
+            <h2>Queue one or many MEGA or Filecrypt links</h2>
+            <p>Paste one public URL per line. Public Filecrypt container links are resolved to MEGA before queueing. Blank lines are ignored and duplicates are removed.</p>
         </div>
         <form action="{{ url_for('submit') }}" method="post" class="submit-form">
-            <label for="urls">MEGA URLs</label>
+            <label for="urls">MEGA or Filecrypt URLs</label>
             <textarea id="urls" name="urls" placeholder="https://mega.nz/file/...
-https://mega.nz/folder/..."></textarea>
+https://mega.nz/folder/...
+https://filecrypt.cc/Container/..."></textarea>
 
             <div class="form-row">
                 <div class="destination-fields">
@@ -33,7 +34,7 @@ https://mega.nz/folder/..."></textarea>
                         placeholder="Optional subfolder or full path, for example movies/new-arrivals or /mnt/disk2/downloads"
                         autocomplete="off"
                     >
-                    <p class="subtle form-hint">Use a relative path for a subfolder inside the selected root, or an absolute path for another mounted disk. Add a custom path to favorites only after it is writable by the app user.</p>
+                    <p class="subtle form-hint">Use a relative path for a subfolder inside the selected root, or an absolute path for another mounted disk. Filecrypt support is limited to public container pages. Add a custom path to favorites only after it is writable by the app user.</p>
                 </div>
                 <div class="button-row">
                     <button type="submit" {% if not has_destinations %}disabled{% endif %}>Start Queue</button>

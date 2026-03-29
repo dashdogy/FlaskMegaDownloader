@@ -33,6 +33,7 @@ Supported LXC guest OS versions:
 
 - Server-rendered Flask app with a Homepage-inspired soft card UI
 - Multi-link submission with whitespace trimming, blank-line removal, and per-batch deduplication
+- Inline Filecrypt container resolution for public `filecrypt.cc` pages that redirect to MEGA
 - Background worker threads with SQLite-backed persisted state
 - Real `mega-get` support via MEGAcmd, plus an explicit fake backend for development only
 - Separate Blu-ray remux queue using MakeMKV CLI plus MediaInfo verification
@@ -103,6 +104,8 @@ Useful config keys:
 - `JOB_STORAGE_FILE`: legacy JSON migration source for first boot after upgrade
 
 Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
+
+The dashboard submit box also accepts public `filecrypt.cc/Container/...` URLs. The app resolves those to MEGA links inline before queueing. Protected Filecrypt pages and direct `.dlc` links are not supported by the local resolver.
 
 Runtime state now lives in `STATE_DB_FILE` as SQLite. On first boot after upgrading, the app imports the legacy `jobs.json` automatically if present, then renames it so the migration is not retried. A corrupt legacy JSON file is quarantined and the app starts with empty state instead of crashing.
 
