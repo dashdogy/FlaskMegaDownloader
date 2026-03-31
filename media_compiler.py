@@ -274,8 +274,10 @@ class MediaCompileManager:
         makemkvcon_binary: str,
         mediainfo_binary: str,
         bluray_min_title_seconds: int,
+        event_logger=None,
     ):
         self.storage = storage
+        self.event_logger = event_logger
         self.makemkvcon_binary = makemkvcon_binary
         self.mediainfo_binary = mediainfo_binary
         self.bluray_min_title_seconds = max(int(bluray_min_title_seconds), 1)
@@ -294,6 +296,19 @@ class MediaCompileManager:
         self.backend_reason = self._build_backend_reason()
         self._load_jobs()
         self._worker.start()
+
+    def _log(self, level: str, feature: str, message: str, *, job: MediaJob | None = None, context: dict | None = None) -> None:
+        if not self.event_logger:
+            return
+        self.event_logger.log(
+            level,
+            "bluray",
+            feature,
+            message,
+            job_id=job.id if job else None,
+            batch_id=job.batch_id if job else None,
+            context=context or {},
+        )
 
     def _build_backend_reason(self) -> str | None:
         missing: list[str] = []
@@ -393,6 +408,14 @@ class MediaCompileManager:
                 new_jobs.append(job)
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+        if new_jobs:
+            self._log(
+                "info",
+                "queued",
+                "Queued Blu-ray remux jobs.",
+                job=new_jobs[0],
+                context={"job_count": len(new_jobs), "output_destination_key": output_destination_key},
+            )
         return new_jobs
 
     def destination_in_use(self, destination_key: str) -> bool:
@@ -412,6 +435,7 @@ class MediaCompileManager:
                 job.touch()
                 self._rebuild_queue_locked()
                 self._persist_locked(force=True)
+                self._log("info", "cancel", "Canceled queued Blu-ray job before start.", job=job)
                 return job
             if job.status not in ACTIVE_MEDIA_JOB_STATUSES:
                 raise ValueError("Only queued or active Blu-ray jobs can be canceled.")
@@ -423,6 +447,7 @@ class MediaCompileManager:
             job.error = "Cancel request sent."
             job.touch()
             self._persist_locked(force=True)
+            self._log("info", "cancel", "Cancel requested for active Blu-ray job.", job=job)
             return job
 
     def retry_job(self, job_id: str) -> MediaJob:
@@ -449,6 +474,7 @@ class MediaCompileManager:
             self._progress_samples.pop(job_id, None)
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+            self._log("info", "retry", "Re-queued Blu-ray job.", job=job)
             return job
 
     def dashboard_payload(self, destination_lookup: dict[str, str] | None = None) -> dict:
@@ -589,6 +615,7 @@ class MediaCompileManager:
                     job.staged_output_file_path = None
                     job.touch()
                     self._persist_locked(force=True)
+                    self._log("info", "start", "Blu-ray worker started job.", job=job, context={"source_path": job.source_path})
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -669,6 +696,13 @@ class MediaCompileManager:
             percent=0,
             message=f"Selected title {title.title_id} for remux.",
         )
+        self._log(
+            "info",
+            "scan",
+            "Selected Blu-ray main feature title.",
+            job=job,
+            context={"title_id": title.title_id, "duration_seconds": title.duration_seconds, "size_bytes": title.size_bytes},
+        )
         return title
 
     def _compile_job(self, job_id: str, cancel_event: threading.Event, title: TitleInfo) -> None:
@@ -680,6 +714,7 @@ class MediaCompileManager:
         output_dir.mkdir(parents=True, exist_ok=True)
         staging_directory.mkdir(parents=True, exist_ok=True)
         self._update_job(job_id, status="compiling", message="Starting MakeMKV remux.")
+        self._log("info", "compile", "Starting MakeMKV remux.", job=job, context={"title_id": title.title_id})
         command = [
             self._makemkvcon_path or self.makemkvcon_binary,
             "--messages=-stdout",
@@ -741,6 +776,17 @@ class MediaCompileManager:
             message="Verification finished.",
         )
         self._cleanup_staging_directory(job)
+        self._log(
+            "info",
+            "verify",
+            "Blu-ray verification finished.",
+            job=job,
+            context={
+                "output_file_path": str(final_output_file_path),
+                "dolby_vision": verification.dolby_vision,
+                "dolby_atmos": verification.dolby_atmos,
+            },
+        )
 
     def _run_robot_command(
         self,
@@ -911,6 +957,12 @@ class MediaCompileManager:
             job.transfer.speed_bps = None
             job.touch()
             self._persist_locked(force=True)
+            if status == "completed":
+                self._log("info", "completed", "Blu-ray remux finished successfully.", job=job)
+            elif status == "canceled":
+                self._log("warning", "canceled", error or "Blu-ray remux canceled.", job=job)
+            else:
+                self._log("error", "failed", error or "Blu-ray remux failed.", job=job)
 
     def _persist_locked(self, force: bool) -> None:
         now = time.monotonic()

@@ -33,9 +33,10 @@ class FakeArchiveExtractManager:
     clear_results: dict[str, int] = {"removed": 0, "canceling": 0}
     clear_calls: int = 0
 
-    def __init__(self, storage, *, seven_zip_binary: str = "7z"):
+    def __init__(self, storage, *, seven_zip_binary: str = "7z", event_logger=None):
         self.storage = storage
         self.seven_zip_binary = seven_zip_binary
+        self.event_logger = event_logger
         self.submitted: list[list[dict]] = []
         FakeArchiveExtractManager.instance = self
 

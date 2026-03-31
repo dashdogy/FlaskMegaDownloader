@@ -416,9 +416,15 @@ button:disabled {
 }
 
 .status-pill.failed,
-.status-pill.canceled {
+.status-pill.canceled,
+.status-pill.error {
     background: rgba(175, 77, 87, 0.12);
     color: var(--danger);
+}
+
+.status-pill.warning {
+    background: rgba(196, 148, 54, 0.16);
+    color: #8f6511;
 }
 
 .status-pill.paused {
@@ -565,6 +571,89 @@ button:disabled {
 .flash-error {
     background: rgba(175, 77, 87, 0.1);
     border-color: rgba(175, 77, 87, 0.18);
+}
+
+.log-summary-row {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    margin-bottom: 18px;
+}
+
+.log-stream-card {
+    display: grid;
+    gap: 12px;
+}
+
+.log-stream-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.log-stream {
+    max-height: 68vh;
+    overflow: auto;
+    display: grid;
+    gap: 10px;
+    padding: 16px;
+    border-radius: 22px;
+    background: rgba(240, 246, 251, 0.88);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.log-entry {
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.82);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.log-entry-main {
+    display: grid;
+    gap: 10px;
+}
+
+.log-entry-meta {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.log-timestamp {
+    color: var(--muted);
+    font-size: 0.84rem;
+}
+
+.log-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: rgba(67, 115, 157, 0.08);
+    color: var(--accent-strong);
+    font-size: 0.78rem;
+}
+
+.log-message {
+    margin: 0;
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.log-context {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: rgba(240, 246, 251, 0.95);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+    color: var(--muted);
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .explorer-shell {

@@ -8,6 +8,7 @@ SECRET_KEY = "replace-this-secret"
 HOST = "0.0.0.0"
 PORT = 8090
 POLL_INTERVAL_MS = 1500
+EVENT_LOG_MAX_ROWS = 5000
 
 JOB_STORAGE_FILE = DATA_DIR / "jobs.json"
 STATE_DB_FILE = DATA_DIR / "state.sqlite3"

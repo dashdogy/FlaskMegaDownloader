@@ -18,8 +18,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ArchiveExtractManager:
-    def __init__(self, storage: JsonStorage, *, seven_zip_binary: str = "7z"):
+    def __init__(self, storage: JsonStorage, *, seven_zip_binary: str = "7z", event_logger=None):
         self.storage = storage
+        self.event_logger = event_logger
         self.seven_zip_binary = seven_zip_binary
         self._lock = threading.RLock()
         self._queue: Queue[str] = Queue()
@@ -33,6 +34,19 @@ class ArchiveExtractManager:
         self._last_persist = 0.0
         self._load_jobs()
         self._worker.start()
+
+    def _log(self, level: str, feature: str, message: str, *, job: ArchiveJob | None = None, context: dict | None = None) -> None:
+        if not self.event_logger:
+            return
+        self.event_logger.log(
+            level,
+            "archive",
+            feature,
+            message,
+            job_id=job.id if job else None,
+            batch_id=job.batch_id if job else None,
+            context=context or {},
+        )
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -103,6 +117,14 @@ class ArchiveExtractManager:
                 created.append(job)
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+        if created:
+            self._log(
+                "info",
+                "queued",
+                "Queued archive extraction jobs.",
+                job=created[0],
+                context={"job_count": len(created), "archive_type": created[0].archive_type},
+            )
         return created
 
     def cancel_job(self, job_id: str) -> ArchiveJob:
@@ -118,11 +140,13 @@ class ArchiveExtractManager:
                 self._cancel_events.pop(job_id, None)
                 self._rebuild_queue_locked()
                 self._persist_locked(force=True)
+                self._log("info", "cancel", "Canceled queued archive job before extraction started.", job=job)
                 return job
             if job.status not in ACTIVE_ARCHIVE_JOB_STATUSES:
                 raise ValueError("Only queued or active archive jobs can be canceled.")
             self._request_cancel_locked(job)
             self._persist_locked(force=True)
+            self._log("info", "cancel", "Cancel requested for active archive job.", job=job)
             return job
 
     def clear_queue(self) -> dict[str, int]:
@@ -139,6 +163,7 @@ class ArchiveExtractManager:
                 removed += 1
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+            self._log("info", "clear", "Processed archive queue clear request.", context={"removed": removed, "canceling": canceling})
             return {
                 "removed": removed,
                 "canceling": canceling,
@@ -260,6 +285,7 @@ class ArchiveExtractManager:
                     job.append_output("Inspecting archive...")
                     job.touch()
                     self._persist_locked(force=True)
+                    self._log("info", "probe", "Archive worker started probing archive.", job=job)
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -275,6 +301,13 @@ class ArchiveExtractManager:
                         bytes_total=probe.bytes_total,
                         message="Archive inspection finished.",
                     )
+                    self._log(
+                        "info",
+                        "probe",
+                        "Archive inspection finished.",
+                        job=job,
+                        context={"bytes_total": probe.bytes_total, "entry_count": probe.entry_count},
+                    )
                     if cancel_event.is_set():
                         raise ArchiveCanceledError("Archive extraction canceled.")
                     self._update_job(
@@ -283,6 +316,7 @@ class ArchiveExtractManager:
                         bytes_done=0,
                         message="Queued archive extraction started.",
                     )
+                    self._log("info", "extract", "Archive extraction started.", job=job, context={"target_path": job.target_path})
                     extracted_paths = extract_archive(
                         Path(job.archive_path),
                         Path(job.target_path),
@@ -299,6 +333,7 @@ class ArchiveExtractManager:
                             status="sorting",
                             message="Sorting extracted videos...",
                         )
+                        self._log("info", "auto_sort", "Archive auto-sort started.", job=job)
                         sort_summary = sort_extracted_videos(
                             extracted_paths,
                             movies_target_path=Path(job.movies_target_path or ""),
@@ -311,6 +346,7 @@ class ArchiveExtractManager:
                             sort_summary=sort_summary.to_dict(),
                             message=build_sort_summary_message(sort_summary),
                         )
+                        self._log("info", "auto_sort", build_sort_summary_message(sort_summary), job=job, context=sort_summary.to_dict())
                 except ArchiveCanceledError as exc:
                     final_status = "canceled"
                     final_error = str(exc)
@@ -414,8 +450,15 @@ class ArchiveExtractManager:
             job.transfer.speed_bps = None
             job.touch()
             if job_id in self._purge_on_finish:
+                self._log("info", "clear", "Purged archive job after clear-queue cancellation completed.", job=job)
                 self._remove_job_locked(job_id)
             self._persist_locked(force=True)
+            if status == "completed":
+                self._log("info", "completed", "Archive extraction finished successfully.", job=job)
+            elif status == "canceled":
+                self._log("warning", "canceled", error or "Archive extraction canceled.", job=job)
+            else:
+                self._log("error", "failed", error or "Archive extraction failed.", job=job)
 
     def _persist_locked(self, force: bool) -> None:
         now = time.monotonic()

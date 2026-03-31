@@ -38,6 +38,7 @@ Supported LXC guest OS versions:
 - Real `mega-get` support via MEGAcmd, plus an explicit fake backend for development only
 - Separate Blu-ray remux queue using MakeMKV CLI plus MediaInfo verification
 - Polling JSON API for live status updates every 1500 ms
+- Dedicated Logs page with live SQLite-backed application event history
 - Safe file explorer rooted inside configured destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
 - RAR extraction with `rarfile` plus a local backend such as `unar`, `unrar`, or `7z`
@@ -58,6 +59,7 @@ Supported LXC guest OS versions:
 - `archive_auto_sort.py`: post-extract video classification and Movies/TvShows routing
 - `explorer.py`: safe file browser helpers
 - `process_utils.py`: shared subprocess shutdown helpers
+- `event_log.py`: structured application debug/event logging plus logging bridge
 - `storage.py`: SQLite state storage plus one-time `jobs.json` migration
 - `templates/`: dashboard and explorer views
 - `static/`: CSS and polling UI logic
@@ -102,17 +104,21 @@ Useful environment variables:
 - `MEGA_DOWNLOADER_BLURAY_MIN_TITLE_SECONDS`: minimum title length used when auto-selecting the main feature
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
+- `MEGA_DOWNLOADER_EVENT_LOG_MAX_ROWS`: rolling application log retention limit
 
 Useful config keys:
 
 - `STATE_DB_FILE`: primary SQLite runtime state path
 - `JOB_STORAGE_FILE`: legacy JSON migration source for first boot after upgrade
+- `EVENT_LOG_MAX_ROWS`: maximum number of persisted application log lines kept in SQLite
 
 Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
 
 The dashboard submit box also accepts public `filecrypt.cc/Container/...` URLs. The app resolves those to MEGA links inline before queueing. Protected Filecrypt pages and direct `.dlc` links are not supported by the local resolver.
 
 Runtime state now lives in `STATE_DB_FILE` as SQLite. On first boot after upgrading, the app imports the legacy `jobs.json` automatically if present, then renames it so the migration is not retried. A corrupt legacy JSON file is quarantined and the app starts with empty state instead of crashing.
+
+The top-nav `Logs` page shows a live event stream for download, archive, explorer, Filecrypt, Blu-ray, and storage activity. It is backed by the same SQLite database and keeps only the newest `EVENT_LOG_MAX_ROWS` entries.
 
 Archive extraction can optionally auto-sort extracted video files after completion. That flow uses the saved move favorites list, requires exactly one favorite labeled `Movies` and one labeled `TvShows`, and relies on the Python `guessit` package from `requirements.txt`. Only video files are moved automatically; other extracted files stay in the extraction folder.
 
@@ -165,6 +171,7 @@ If either `makemkvcon` or `mediainfo` is missing, the dashboard and explorer sho
 
 - `GET /api/jobs`: queue summary plus job and batch details, plus Blu-ray remux queue data
 - `GET /api/explorer?root=downloads&path=subdir`: safe explorer payload
+- `GET /api/logs?after_id=<id>`: incremental application event log feed for the Logs page
 
 ## systemd
 

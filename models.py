@@ -49,6 +49,22 @@ def utcnow_iso() -> str:
 
 
 @dataclass(slots=True)
+class EventLogEntry:
+    id: int | None = None
+    created_at: str = field(default_factory=utcnow_iso)
+    level: str = "info"
+    subsystem: str = "app"
+    feature: str = ""
+    message: str = ""
+    job_id: str | None = None
+    batch_id: str | None = None
+    context: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class TransferStatus:
     bytes_done: int = 0
     bytes_total: int | None = None

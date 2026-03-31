@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="card section-card">
+    <div class="section-heading">
+        <div>
+            <p class="eyebrow">Application Logs</p>
+            <h2>Live debug event stream</h2>
+            <p class="subtle">Rolling SQLite-backed history for downloads, Filecrypt, archives, explorer actions, Blu-ray remux, storage, and runtime warnings.</p>
+        </div>
+        <p class="subtle" id="logs-updated">Updated {{ log_payload.updated_at|datetime_local }}</p>
+    </div>
+
+    <div class="log-summary-row">
+        <div class="stat-tile">
+            <span>Retention</span>
+            <strong>{{ config.EVENT_LOG_MAX_ROWS if config is defined else 5000 }}</strong>
+            <small class="subtle">Newest lines kept in the rolling log</small>
+        </div>
+        <div class="stat-tile">
+            <span>Polling</span>
+            <strong>{{ poll_interval_ms }} ms</strong>
+            <small class="subtle">New events append live at the bottom</small>
+        </div>
+    </div>
+
+    <section class="log-stream-card">
+        <div class="log-stream-header">
+            <strong>Event stream</strong>
+            <span class="subtle" id="log-follow-state">Auto-following newest lines</span>
+        </div>
+        <div id="log-stream" class="log-stream" aria-live="polite"></div>
+    </section>
+</section>
+
+<script id="initial-logs" type="application/json">{{ log_payload|tojson }}</script>
+<script src="{{ url_for('static', filename='logs.js') }}" defer></script>
+{% endblock %}

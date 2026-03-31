@@ -8,11 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from models import ArchiveJob, FavoriteDestination, Job, MediaJob, MoveFavorite
+from models import ArchiveJob, EventLogEntry, FavoriteDestination, Job, MediaJob, MoveFavorite
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def _utc_compact_timestamp() -> str:
@@ -25,6 +25,7 @@ class SQLiteStorage:
         self.legacy_json_path = Path(legacy_json_path).expanduser().resolve() if legacy_json_path else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._startup_notices: list[dict] = []
         self._initialize_database()
 
     def _connect(self) -> sqlite3.Connection:
@@ -128,6 +129,18 @@ class SQLiteStorage:
                     label TEXT NOT NULL,
                     path TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS event_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    subsystem TEXT NOT NULL,
+                    feature TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    job_id TEXT,
+                    batch_id TEXT,
+                    context_json TEXT NOT NULL
+                );
                 """
             )
             self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
@@ -164,6 +177,17 @@ class SQLiteStorage:
                 quarantine_path,
                 exc,
             )
+            self._startup_notices.append(
+                {
+                    "level": "warning",
+                    "subsystem": "storage",
+                    "feature": "migration",
+                    "message": (
+                        f"Legacy JSON state could not be parsed and was quarantined at {quarantine_path}."
+                    ),
+                    "context": {"error": str(exc)},
+                }
+            )
             return
 
         jobs = [Job.from_dict(item) for item in raw_payload.get("jobs", [])]
@@ -195,6 +219,21 @@ class SQLiteStorage:
 
         migrated_path = self._rename_legacy_file("migrated")
         LOGGER.info("Migrated legacy JSON state from %s to %s", migrated_path, self.path)
+        self._startup_notices.append(
+            {
+                "level": "info",
+                "subsystem": "storage",
+                "feature": "migration",
+                "message": f"Migrated legacy JSON state from {migrated_path.name} into SQLite state.",
+                "context": {"database_path": str(self.path)},
+            }
+        )
+
+    def consume_startup_notices(self) -> list[dict]:
+        with self._lock:
+            notices = list(self._startup_notices)
+            self._startup_notices.clear()
+            return notices
 
     def _rename_legacy_file(self, suffix: str) -> Path:
         assert self.legacy_json_path is not None
@@ -282,6 +321,64 @@ class SQLiteStorage:
                 """
             ).fetchall()
         return [self._archive_job_from_row(row) for row in rows]
+
+    def load_event_logs(self, *, limit: int = 200, after_id: int | None = None) -> list[EventLogEntry]:
+        params: list[object]
+        if after_id is not None:
+            query = """
+                SELECT *
+                FROM event_logs
+                WHERE id > ?
+                ORDER BY id ASC
+                LIMIT ?
+            """
+            params = [int(after_id), int(limit)]
+        else:
+            query = """
+                SELECT *
+                FROM (
+                    SELECT * FROM event_logs ORDER BY id DESC LIMIT ?
+                )
+                ORDER BY id ASC
+            """
+            params = [int(limit)]
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._event_log_from_row(row) for row in rows]
+
+    def append_event_log(self, entry: EventLogEntry, *, max_rows: int) -> EventLogEntry:
+        payload = entry.to_dict()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO event_logs(
+                    created_at, level, subsystem, feature, message, job_id, batch_id, context_json
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["created_at"],
+                    payload["level"],
+                    payload["subsystem"],
+                    payload["feature"],
+                    payload["message"],
+                    payload["job_id"],
+                    payload["batch_id"],
+                    json.dumps(payload["context"]),
+                ),
+            )
+            entry.id = int(cursor.lastrowid)
+            if max_rows > 0:
+                connection.execute(
+                    """
+                    DELETE FROM event_logs
+                    WHERE id NOT IN (
+                        SELECT id FROM event_logs ORDER BY id DESC LIMIT ?
+                    )
+                    """,
+                    (int(max_rows),),
+                )
+            connection.commit()
+        return entry
 
     def save_state(
         self,
@@ -548,6 +645,19 @@ class SQLiteStorage:
             "output_tail": json.loads(row["output_tail_json"] or "[]"),
         }
         return ArchiveJob.from_dict(payload)
+
+    def _event_log_from_row(self, row: sqlite3.Row) -> EventLogEntry:
+        return EventLogEntry(
+            id=int(row["id"]),
+            created_at=row["created_at"],
+            level=row["level"],
+            subsystem=row["subsystem"],
+            feature=row["feature"],
+            message=row["message"],
+            job_id=row["job_id"],
+            batch_id=row["batch_id"],
+            context=json.loads(row["context_json"] or "{}"),
+        )
 
 
 JsonStorage = SQLiteStorage

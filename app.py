@@ -19,6 +19,7 @@ from archives import (
     is_supported_archive_path,
 )
 from downloader import DownloadManager, ensure_destination_writable
+from event_log import EventLogService, install_event_log_bridge
 from explorer import (
     delete_entries,
     list_directory,
@@ -34,7 +35,7 @@ from explorer import (
 )
 from filecrypt_resolver import FilecryptResolutionError, expand_submission_urls_with_metadata
 from media_compiler import MediaCompileManager, detect_bluray_source
-from models import ACTIVE_ARCHIVE_JOB_STATUSES, MoveFavorite
+from models import ACTIVE_ARCHIVE_JOB_STATUSES, MoveFavorite, utcnow_iso
 from storage import JsonStorage
 
 
@@ -105,6 +106,19 @@ def pluralize(count: int, singular: str, plural: str | None = None) -> str:
     return plural or f"{singular}s"
 
 
+def submission_source_summary(urls: list[str]) -> dict[str, int]:
+    summary = {"mega": 0, "filecrypt": 0, "other": 0}
+    for url in urls:
+        lowered = str(url).lower()
+        if "filecrypt.cc" in lowered:
+            summary["filecrypt"] += 1
+        elif "mega.nz" in lowered or "mega.co.nz" in lowered:
+            summary["mega"] += 1
+        else:
+            summary["other"] += 1
+    return summary
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(default_config)
@@ -135,28 +149,69 @@ def create_app() -> Flask:
         app.config["STATE_DB_FILE"],
         legacy_json_path=app.config["JOB_STORAGE_FILE"],
     )
+    event_logger = EventLogService(storage, max_rows=app.config["EVENT_LOG_MAX_ROWS"])
+    bridge_handler = install_event_log_bridge(event_logger)
     manager = DownloadManager(
         storage=storage,
         destinations=app.config["ALLOWED_DESTINATIONS"],
         megacmd_binary=app.config["MEGACMD_BINARY"],
         backend=app.config["DOWNLOADER_BACKEND"],
+        event_logger=event_logger,
     )
     media_manager = MediaCompileManager(
         storage=storage,
         makemkvcon_binary=app.config["MAKEMKVCON_BINARY"],
         mediainfo_binary=app.config["MEDIAINFO_BINARY"],
         bluray_min_title_seconds=app.config["BLURAY_MIN_TITLE_SECONDS"],
+        event_logger=event_logger,
     )
     archive_manager = ArchiveExtractManager(
         storage=storage,
         seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
+        event_logger=event_logger,
     )
     app.extensions["download_manager"] = manager
     app.extensions["media_compile_manager"] = media_manager
     app.extensions["archive_extract_manager"] = archive_manager
+    app.extensions["event_logger"] = event_logger
+    app.extensions["event_log_bridge_handler"] = bridge_handler
     atexit.register(manager.stop)
     atexit.register(media_manager.stop)
     atexit.register(archive_manager.stop)
+
+    for startup_notice in storage.consume_startup_notices():
+        event_logger.log(
+            startup_notice.get("level", "info"),
+            startup_notice.get("subsystem", "storage"),
+            startup_notice.get("feature", "startup"),
+            startup_notice.get("message", "Storage startup event."),
+            context=startup_notice.get("context"),
+        )
+    event_logger.info(
+        "app",
+        "startup",
+        "Application initialized.",
+        context={
+            "state_db": str(app.config["STATE_DB_FILE"]),
+            "download_backend": manager.backend_name,
+            "archive_backend": app.config["SEVEN_ZIP_BINARY"],
+            "bluray_backend_available": media_manager.backend_reason is None,
+        },
+    )
+    if manager.backend_reason:
+        event_logger.warning(
+            "download",
+            "backend",
+            manager.backend_reason,
+            context={"backend": manager.backend_name},
+        )
+    if media_manager.backend_reason:
+        event_logger.warning(
+            "bluray",
+            "backend",
+            media_manager.backend_reason,
+            context={"backend": media_manager.backend_payload()["label"]},
+        )
 
     def explorer_redirect(root_key: str, current_path: str, sort_by: str):
         return redirect(url_for("explorer", root=root_key, path=current_path, sort=sort_by))
@@ -189,6 +244,18 @@ def create_app() -> Flask:
         payload["media"] = media_manager.dashboard_payload(destination_label_lookup())
         payload["archives"] = archive_manager.dashboard_payload()
         return payload
+
+    def logs_payload(*, after_id: int | None = None, limit: int = 200) -> dict:
+        entries = [entry.to_dict() for entry in event_logger.load(after_id=after_id, limit=limit)]
+        last_id = entries[-1]["id"] if entries else after_id
+        return {
+            "entries": entries,
+            "last_id": last_id,
+            "updated_at": utcnow_iso(),
+        }
+
+    def log_event(level: str, subsystem: str, feature: str, message: str, **kwargs):
+        event_logger.log(level, subsystem, feature, message, **kwargs)
 
     def move_favorite_options() -> list[dict]:
         favorites = storage.load_move_favorites()
@@ -386,6 +453,10 @@ def create_app() -> Flask:
     def dashboard():
         return render_template("index.html", dashboard=dashboard_payload())
 
+    @app.get("/logs")
+    def logs():
+        return render_template("logs.html", log_payload=logs_payload())
+
     @app.post("/submit")
     def submit():
         urls = parse_urls(request.form.get("urls", ""))
@@ -393,13 +464,46 @@ def create_app() -> Flask:
         destination_subpath = normalize_destination_path_input(request.form.get("destination_path", ""))
         if not urls:
             flash("Paste at least one MEGA or Filecrypt URL.", "error")
+            log_event("warning", "download", "submit", "Submission rejected because no URLs were provided.")
             return redirect(url_for("dashboard"))
+
+        log_event(
+            "info",
+            "download",
+            "submit",
+            "Processing download submission.",
+            context={
+                "url_count": len(urls),
+                "source_summary": submission_source_summary(urls),
+                "destination_key": destination_key,
+                "destination_path": destination_subpath,
+            },
+        )
 
         try:
             urls, resolution_summary, metadata_overrides = expand_submission_urls_with_metadata(urls)
         except FilecryptResolutionError as exc:
             flash(str(exc), "error")
+            log_event(
+                "error",
+                "filecrypt",
+                "resolve",
+                "Filecrypt resolution failed during submission.",
+                context={"error": str(exc)},
+            )
             return redirect(url_for("dashboard"))
+
+        if resolution_summary.containers_resolved:
+            log_event(
+                "info",
+                "filecrypt",
+                "resolve",
+                "Resolved Filecrypt container links into MEGA URLs.",
+                context={
+                    "containers_resolved": resolution_summary.containers_resolved,
+                    "mega_links_resolved": resolution_summary.mega_links_resolved,
+                },
+            )
 
         try:
             jobs = manager.submit(
@@ -410,6 +514,13 @@ def create_app() -> Flask:
             )
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event(
+                "error",
+                "download",
+                "submit",
+                "Download submission failed.",
+                context={"error": str(exc), "destination_key": destination_key},
+            )
             return redirect(url_for("dashboard"))
 
         if resolution_summary.containers_resolved:
@@ -423,6 +534,14 @@ def create_app() -> Flask:
                 "success",
             )
         flash(f"Queued {len(jobs)} job(s) in batch {jobs[0].batch_id}.", "success")
+        log_event(
+            "info",
+            "download",
+            "submit",
+            "Queued download batch.",
+            batch_id=jobs[0].batch_id,
+            context={"job_count": len(jobs), "destination_key": destination_key},
+        )
         return redirect(url_for("dashboard"))
 
     @app.post("/favorites")
@@ -431,18 +550,33 @@ def create_app() -> Flask:
         destination_input = normalize_destination_path_input(request.form.get("destination_path", ""))
         if not destination_input:
             flash("Enter a custom destination path before adding it to favorites.", "error")
+            log_event("warning", "app", "destination_favorite", "Destination favorite add rejected because the path was empty.")
             return post_context_redirect()
 
         try:
             favorite = manager.add_favorite_destination(destination_key, destination_input)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event(
+                "error",
+                "app",
+                "destination_favorite",
+                "Destination favorite add failed.",
+                context={"error": str(exc), "destination_key": destination_key, "path": destination_input},
+            )
             return post_context_redirect()
 
         if favorite["created"]:
             flash(f"Added favorite destination: {favorite['path']}", "success")
         else:
             flash(f"Destination already exists in the dropdown: {favorite['path']}", "success")
+        log_event(
+            "info",
+            "app",
+            "destination_favorite",
+            "Processed destination favorite request.",
+            context={"created": favorite["created"], "path": favorite["path"], "destination_key": destination_key},
+        )
         return post_context_redirect()
 
     @app.post("/destinations/<destination_key>/delete")
@@ -453,8 +587,22 @@ def create_app() -> Flask:
                 extra_in_use=media_manager.destination_in_use(destination_key),
             )
             flash(f"Deleted {deleted['type']} destination: {deleted['label']}.", "success")
+            log_event(
+                "info",
+                "app",
+                "destination_delete",
+                "Deleted configured destination.",
+                context=deleted,
+            )
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event(
+                "error",
+                "app",
+                "destination_delete",
+                "Destination delete failed.",
+                context={"destination_key": destination_key, "error": str(exc)},
+            )
         return redirect_back_or("dashboard")
 
     @app.post("/destinations/restore")
@@ -464,19 +612,34 @@ def create_app() -> Flask:
             flash(f"Restored {restored} configured destination(s).", "success")
         else:
             flash("There were no hidden configured destinations to restore.", "success")
+        log_event(
+            "info",
+            "app",
+            "destination_restore",
+            "Processed destination restore request.",
+            context={"restored": restored},
+        )
         return redirect_back_or("dashboard")
 
     @app.get("/api/jobs")
     def api_jobs():
         return jsonify(dashboard_payload())
 
+    @app.get("/api/logs")
+    def api_logs():
+        raw_after_id = request.args.get("after_id", "").strip()
+        after_id = int(raw_after_id) if raw_after_id.isdigit() else None
+        return jsonify(logs_payload(after_id=after_id))
+
     @app.post("/jobs/<job_id>/cancel")
     def cancel_job(job_id: str):
         try:
             manager.cancel_job(job_id)
             flash("Cancel request sent.", "success")
+            log_event("info", "download", "cancel", "Download cancel requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "download", "cancel", "Download cancel request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/jobs/<job_id>/retry")
@@ -484,8 +647,10 @@ def create_app() -> Flask:
         try:
             manager.retry_job(job_id)
             flash("Job re-queued.", "success")
+            log_event("info", "download", "retry", "Download retry requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "download", "retry", "Download retry request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/media-jobs/<job_id>/cancel")
@@ -493,8 +658,10 @@ def create_app() -> Flask:
         try:
             media_manager.cancel_job(job_id)
             flash("Blu-ray cancel request sent.", "success")
+            log_event("info", "bluray", "cancel", "Blu-ray cancel requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "bluray", "cancel", "Blu-ray cancel request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/media-jobs/<job_id>/retry")
@@ -502,8 +669,10 @@ def create_app() -> Flask:
         try:
             media_manager.retry_job(job_id)
             flash("Blu-ray job re-queued.", "success")
+            log_event("info", "bluray", "retry", "Blu-ray retry requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "bluray", "retry", "Blu-ray retry request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/archive-jobs/<job_id>/cancel")
@@ -511,8 +680,10 @@ def create_app() -> Flask:
         try:
             archive_manager.cancel_job(job_id)
             flash("Archive cancel request sent.", "success")
+            log_event("info", "archive", "cancel", "Archive cancel requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "archive", "cancel", "Archive cancel request failed.", job_id=job_id, context={"error": str(exc)})
         return post_context_redirect("dashboard")
 
     @app.post("/archive-jobs/clear")
@@ -528,6 +699,7 @@ def create_app() -> Flask:
         if not messages:
             messages.append("Archive extraction queue was already empty.")
         flash(" ".join(messages), "success")
+        log_event("info", "archive", "clear", "Processed archive queue clear request.", context=result)
         return post_context_redirect("dashboard")
 
     @app.post("/jobs/<job_id>/pause")
@@ -535,8 +707,10 @@ def create_app() -> Flask:
         try:
             manager.pause_job(job_id)
             flash("Pause request sent.", "success")
+            log_event("info", "download", "pause", "Download pause requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "download", "pause", "Download pause request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/jobs/<job_id>/resume")
@@ -544,8 +718,10 @@ def create_app() -> Flask:
         try:
             manager.resume_job(job_id)
             flash("Resume request sent.", "success")
+            log_event("info", "download", "resume", "Download resume requested.", job_id=job_id)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "download", "resume", "Download resume request failed.", job_id=job_id, context={"error": str(exc)})
         return redirect_back_or("dashboard")
 
     @app.post("/jobs/clear")
@@ -561,6 +737,7 @@ def create_app() -> Flask:
         if not messages:
             messages.append("Queue was already empty.")
         flash(" ".join(messages), "success")
+        log_event("info", "download", "clear", "Processed download queue clear request.", context=result)
         return redirect_back_or("dashboard")
 
     @app.post("/jobs/toggle-all")
@@ -568,14 +745,17 @@ def create_app() -> Flask:
         toggle = manager.bulk_pause_toggle()
         if not toggle["available"]:
             flash("There were no queued, active, or paused jobs to change.", "success")
+            log_event("debug", "download", "bulk_toggle", "Bulk pause toggle ignored because no eligible jobs were found.")
             return redirect_back_or("dashboard")
 
         if toggle["action"] == "pause":
             result = manager.pause_all()
             flash(f"Paused {result['paused']} queued or active job(s).", "success")
+            log_event("info", "download", "bulk_pause", "Paused all eligible downloads.", context=result)
         else:
             result = manager.resume_all()
             flash(f"Resumed {result['resumed']} paused job(s).", "success")
+            log_event("info", "download", "bulk_resume", "Resumed all paused downloads.", context=result)
         return redirect_back_or("dashboard")
 
     @app.post("/jobs/sort")
@@ -585,12 +765,14 @@ def create_app() -> Flask:
             result = manager.sort_queue(sort_by)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "download", "sort", "Queued download sort failed.", context={"sort_by": sort_by, "error": str(exc)})
             return redirect_back_or("dashboard")
 
         if result["sorted"]:
             flash(f"Sorted {result['sorted']} queued job(s) by {result['label']}.", "success")
         else:
             flash("There were no queued jobs to sort.", "success")
+        log_event("info", "download", "sort", "Processed queued download sort request.", context=result)
         return redirect_back_or("dashboard")
 
     @app.get("/explorer")
@@ -598,6 +780,7 @@ def create_app() -> Flask:
         destination_options = manager.destination_options()
         if not destination_options:
             flash("No destinations are configured. Restore or add one before opening the explorer.", "error")
+            log_event("warning", "explorer", "open", "Explorer open rejected because no destinations are configured.")
             return redirect(url_for("dashboard"))
         requested_root = request.args.get("root") or destination_options[0]["key"]
         requested_path = request.args.get("path", "")
@@ -629,6 +812,7 @@ def create_app() -> Flask:
             result = delete_entries(manager.destinations, root_key, current_path, selected_paths)
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
+            log_event("error", "explorer", "delete", "Explorer delete failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if result["deleted"]:
@@ -640,6 +824,13 @@ def create_app() -> Flask:
             )
         if not result["deleted"] and not result["failures"]:
             flash("No items were deleted.", "error")
+        log_event(
+            "info",
+            "explorer",
+            "delete",
+            "Processed explorer delete request.",
+            context={"root": root_key, "path": current_path, "deleted": len(result["deleted"]), "failures": len(result["failures"])},
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/rename")
@@ -654,12 +845,20 @@ def create_app() -> Flask:
             result = rename_entry(manager.destinations, root_key, current_path, relative_path, new_name)
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
+            log_event("error", "explorer", "rename", "Explorer rename failed.", context={"root": root_key, "path": current_path, "entry_path": relative_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if result["renamed"]:
             flash(f"Renamed item to {result['name']}.", "success")
         else:
             flash(f"Name already matches {result['name']}.", "success")
+        log_event(
+            "info",
+            "explorer",
+            "rename",
+            "Processed explorer rename request.",
+            context={"root": root_key, "path": current_path, "renamed": result["renamed"], "name": result["name"]},
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/extract")
@@ -682,6 +881,7 @@ def create_app() -> Flask:
             )
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
+            log_event("error", "archive", "queue", "Archive extraction queue request failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if result["queued"]:
@@ -705,6 +905,20 @@ def create_app() -> Flask:
             flash("No archive extraction jobs were queued.", "error")
         elif auto_sort_enabled and result["queued"]:
             flash("Auto-sort will move extracted videos into the saved Movies or TvShows favorites after extraction finishes.", "success")
+        log_event(
+            "info",
+            "archive",
+            "queue",
+            "Processed archive extraction queue request.",
+            context={
+                "root": root_key,
+                "path": current_path,
+                "queued": len(result["queued"]),
+                "skipped": len(result["skipped"]),
+                "failures": len(result["failures"]),
+                "auto_sort_enabled": auto_sort_enabled,
+            },
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/move-favorites")
@@ -715,18 +929,27 @@ def create_app() -> Flask:
         move_target = normalize_move_target_input(request.form.get("move_target", ""))
         if not move_target:
             flash("Enter a move target path before saving it.", "error")
+            log_event("warning", "explorer", "move_favorite", "Move target favorite add rejected because the path was empty.")
             return explorer_redirect(root_key, current_path, sort_by)
 
         try:
             favorite = save_move_favorite(root_key, current_path, move_target)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "explorer", "move_favorite", "Move target favorite add failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if favorite["created"]:
             flash(f"Added move target favorite: {favorite['path']}", "success")
         else:
             flash(f"Move target already exists in saved targets: {favorite['path']}", "success")
+        log_event(
+            "info",
+            "explorer",
+            "move_favorite",
+            "Processed move target favorite request.",
+            context={"created": favorite["created"], "path": favorite["path"]},
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/move")
@@ -748,9 +971,17 @@ def create_app() -> Flask:
             )
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
+            log_event("error", "explorer", "move", "Explorer move preview failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if preview["conflicts"] and not replace_existing:
+            log_event(
+                "warning",
+                "explorer",
+                "move_preview",
+                "Explorer move requires replace confirmation.",
+                context={"target_dir": str(preview["target_dir"]), "conflicts": preview["conflicts"]},
+            )
             return render_explorer_page(
                 root_key,
                 current_path,
@@ -775,6 +1006,7 @@ def create_app() -> Flask:
             )
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
+            log_event("error", "explorer", "move", "Explorer move failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         if result["moved"]:
@@ -794,6 +1026,18 @@ def create_app() -> Flask:
             )
         if not result["moved"] and not result["replaced"] and not result["failures"]:
             flash("No items were moved.", "error")
+        log_event(
+            "info",
+            "explorer",
+            "move",
+            "Processed explorer move request.",
+            context={
+                "target_dir": str(result["target_dir"]),
+                "moved": len(result["moved"]),
+                "replaced": len(result["replaced"]),
+                "failures": len(result["failures"]),
+            },
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/compile-bluray")
@@ -808,6 +1052,7 @@ def create_app() -> Flask:
         backend = media_manager.backend_payload()
         if not backend["available"]:
             flash(backend["reason"] or "Blu-ray remux backend is unavailable.", "error")
+            log_event("warning", "bluray", "queue", backend["reason"] or "Blu-ray remux backend is unavailable.")
             return explorer_redirect(root_key, current_path, sort_by)
 
         try:
@@ -819,6 +1064,7 @@ def create_app() -> Flask:
             )
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
+            log_event("error", "bluray", "queue", "Blu-ray source selection failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         try:
@@ -829,6 +1075,7 @@ def create_app() -> Flask:
             ensure_destination_writable(output_destination_path)
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "bluray", "queue", "Blu-ray destination resolution failed.", context={"error": str(exc), "destination_key": destination_key})
             return explorer_redirect(root_key, current_path, sort_by)
 
         valid_sources = []
@@ -842,6 +1089,7 @@ def create_app() -> Flask:
 
         if not valid_sources:
             flash("Select one or more Blu-ray folders that contain BDMV/index.bdmv.", "error")
+            log_event("warning", "bluray", "queue", "Blu-ray queue request rejected because no valid sources were selected.")
             return explorer_redirect(root_key, current_path, sort_by)
 
         try:
@@ -855,6 +1103,7 @@ def create_app() -> Flask:
             )
         except ValueError as exc:
             flash(str(exc), "error")
+            log_event("error", "bluray", "queue", "Blu-ray queue request failed.", context={"error": str(exc)})
             return explorer_redirect(root_key, current_path, sort_by)
 
         flash(f"Queued {len(jobs)} Blu-ray remux job(s).", "success")
@@ -863,6 +1112,14 @@ def create_app() -> Flask:
                 f"Skipped {len(skipped)} item(s) that are not valid Blu-ray folders: {summarize_items(skipped)}.",
                 "success",
             )
+        log_event(
+            "info",
+            "bluray",
+            "queue",
+            "Queued Blu-ray remux jobs.",
+            batch_id=jobs[0].batch_id if jobs else None,
+            context={"queued": len(jobs), "skipped": len(skipped), "destination_key": destination_key},
+        )
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/unzip")
@@ -891,6 +1148,15 @@ def create_app() -> Flask:
                 flash(result["failures"][0], "error")
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
+            log_event("error", "archive", "queue", "Single-archive extraction queue request failed.", context={"root": root_key, "archive_path": archive_rel, "error": str(exc)})
+        else:
+            log_event(
+                "info",
+                "archive",
+                "queue",
+                "Processed single-archive extraction queue request.",
+                context={"root": root_key, "archive_path": archive_rel, "queued": len(result["queued"]), "failures": len(result["failures"])},
+            )
         return explorer_redirect(root_key, archive_parent, sort_by)
 
     return app

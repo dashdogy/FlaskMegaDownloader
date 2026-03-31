@@ -848,8 +848,10 @@ class DownloadManager:
         destinations: dict,
         megacmd_binary: str = "mega-get",
         backend: str = "auto",
+        event_logger=None,
     ):
         self.storage = storage
+        self.event_logger = event_logger
         self.base_destinations = normalize_destinations(destinations)
         self.favorite_destinations: dict[str, dict] = {}
         self.hidden_base_destination_keys: set[str] = set()
@@ -875,6 +877,19 @@ class DownloadManager:
         self._load_favorites()
         self._load_jobs()
         self._worker.start()
+
+    def _log(self, level: str, feature: str, message: str, *, job: Job | None = None, context: dict | None = None) -> None:
+        if not self.event_logger:
+            return
+        self.event_logger.log(
+            level,
+            "download",
+            feature,
+            message,
+            job_id=job.id if job else None,
+            batch_id=job.batch_id if job else None,
+            context=context or {},
+        )
 
     def _select_adapter(self):
         mega = MegaDownloader(self.megacmd_binary)
@@ -1105,6 +1120,14 @@ class DownloadManager:
                 new_jobs.append(job)
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+        if new_jobs:
+            self._log(
+                "info",
+                "queued",
+                "Queued download jobs.",
+                job=new_jobs[0],
+                context={"job_count": len(new_jobs), "destination_key": destination_key},
+            )
         return new_jobs
 
     def add_favorite_destination(self, destination_key: str, destination_input: str) -> dict:
@@ -1243,6 +1266,7 @@ class DownloadManager:
             job.touch()
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+            self._log("info", "pause", "Paused queued download before start.", job=job)
             return job
         if job.status not in ACTIVE_JOB_STATUSES:
             raise ValueError("Only queued or active jobs can be paused.")
@@ -1264,6 +1288,7 @@ class DownloadManager:
         job.touch()
         self._rebuild_queue_locked()
         self._persist_locked(force=True)
+        self._log("info", "pause", "Paused active download.", job=job)
         return job
 
     def _request_resume_locked(self, job_id: str) -> Job:
@@ -1285,6 +1310,7 @@ class DownloadManager:
             job.touch()
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+            self._log("info", "resume", "Resumed active download.", job=job)
             return job
 
         job.status = "queued"
@@ -1292,6 +1318,7 @@ class DownloadManager:
         job.touch()
         self._rebuild_queue_locked()
         self._persist_locked(force=True)
+        self._log("info", "resume", "Queued paused download to resume.", job=job)
         return job
 
     def cancel_job(self, job_id: str) -> Job:
@@ -1304,6 +1331,7 @@ class DownloadManager:
                 job.touch()
                 self._rebuild_queue_locked()
                 self._persist_locked(force=True)
+                self._log("info", "cancel", "Canceled queued download before start.", job=job)
                 return job
             if job.status == "paused" and not self._has_live_runtime_locked(job_id):
                 job.status = "canceled"
@@ -1314,6 +1342,7 @@ class DownloadManager:
                 self._pause_events.pop(job_id, None)
                 self._rebuild_queue_locked()
                 self._persist_locked(force=True)
+                self._log("info", "cancel", "Canceled paused download before resume.", job=job)
                 return job
 
             return self._request_cancel_locked(job_id)
@@ -1365,6 +1394,7 @@ class DownloadManager:
             self._purge_on_finish.discard(job_id)
             self._rebuild_queue_locked()
             self._persist_locked(force=True)
+            self._log("info", "retry", "Re-queued download job.", job=job)
             return job
 
     def pause_all(self) -> dict[str, int]:
@@ -1625,6 +1655,7 @@ class DownloadManager:
                     )
                     destination_dir.mkdir(parents=True, exist_ok=True)
                     self._persist_locked(force=True)
+                    self._log("info", "start", "Download worker started job.", job=job, context={"destination_path": str(destination_dir)})
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -1676,7 +1707,10 @@ class DownloadManager:
             if job.status == "paused":
                 job.transfer.paused = True
             if "display_name" in kwargs and kwargs["display_name"]:
+                previous_name = job.display_name
                 job.display_name = kwargs["display_name"]
+                if kwargs["display_name"] != previous_name:
+                    self._log("debug", "metadata", "Resolved download display name.", job=job, context={"display_name": kwargs["display_name"]})
 
             transfer = job.transfer
             speed_provided = "speed_bps" in kwargs and kwargs["speed_bps"] not in {None, 0}
@@ -1771,6 +1805,7 @@ class DownloadManager:
                 return
 
             if job_id in self._purge_on_finish:
+                self._log("info", "clear", "Purged download after clear-queue cancellation completed.", job=job)
                 self._jobs.pop(job_id, None)
                 self._cancel_events.pop(job_id, None)
                 self._pause_events.pop(job_id, None)
@@ -1792,6 +1827,12 @@ class DownloadManager:
             job.transfer.speed_bps = None
             job.touch()
             self._persist_locked(force=True)
+            if status == "completed":
+                self._log("info", "completed", "Download finished successfully.", job=job)
+            elif status == "canceled":
+                self._log("warning", "canceled", error or "Download canceled.", job=job)
+            else:
+                self._log("error", "failed", error or "Download failed.", job=job)
 
     def _persist_locked(self, force: bool) -> None:
         now = time.monotonic()
