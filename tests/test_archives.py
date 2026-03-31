@@ -140,6 +140,11 @@ class ArchiveTests(unittest.TestCase):
     def test_archive_type_detection_supports_zip_rar_and_7z_entrypoints(self) -> None:
         self.assertEqual(archive_type_for_path(Path("sample.zip")), "zip")
         self.assertEqual(archive_type_for_path(Path("sample.rar")), "rar")
+        self.assertEqual(archive_type_for_path(Path("sample.part1.rar")), "rar")
+        self.assertEqual(archive_type_for_path(Path("sample.part01.rar")), "rar")
+        self.assertIsNone(archive_type_for_path(Path("sample.part2.rar")))
+        self.assertIsNone(archive_type_for_path(Path("sample.part02.rar")))
+        self.assertIsNone(archive_type_for_path(Path("sample.r00")))
         self.assertEqual(archive_type_for_path(Path("sample.7z")), "7z")
         self.assertEqual(archive_type_for_path(Path("sample.7z.001")), "7z")
         self.assertIsNone(archive_type_for_path(Path("sample.7z.002")))
@@ -148,6 +153,8 @@ class ArchiveTests(unittest.TestCase):
 
     def test_default_archive_target_name_supports_7z_split_volumes(self) -> None:
         self.assertEqual(default_archive_target_name(Path("movie.zip")), "movie")
+        self.assertEqual(default_archive_target_name(Path("movie.part1.rar")), "movie")
+        self.assertEqual(default_archive_target_name(Path("movie.part01.rar")), "movie")
         self.assertEqual(default_archive_target_name(Path("movie.7z")), "movie")
         self.assertEqual(default_archive_target_name(Path("movie.7z.001")), "movie")
 
@@ -168,6 +175,27 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(entries["movie.7z.001"]["archive_type"], "7z")
         self.assertFalse(entries["movie.7z.002"]["is_archive"])
         self.assertIsNone(entries["movie.7z.002"]["archive_type"])
+
+    def test_explorer_marks_only_first_multipart_rar_volume_as_extractable(self) -> None:
+        with TemporaryDirectory(prefix="archive-explorer-rar-") as temp_dir:
+            root = Path(temp_dir)
+            (root / "movie.part1.rar").write_bytes(b"part1")
+            (root / "movie.part2.rar").write_bytes(b"part2")
+            (root / "movie.r00").write_bytes(b"cont")
+            payload = list_directory(
+                {"downloads": {"key": "downloads", "label": "Downloads", "path": root}},
+                "downloads",
+                "",
+                "name",
+            )
+
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertTrue(entries["movie.part1.rar"]["is_archive"])
+        self.assertEqual(entries["movie.part1.rar"]["archive_type"], "rar")
+        self.assertFalse(entries["movie.part2.rar"]["is_archive"])
+        self.assertIsNone(entries["movie.part2.rar"]["archive_type"])
+        self.assertFalse(entries["movie.r00"]["is_archive"])
+        self.assertIsNone(entries["movie.r00"]["archive_type"])
 
     def test_extract_archive_supports_rar(self) -> None:
         with TemporaryDirectory(prefix="archive-rar-") as temp_dir:

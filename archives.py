@@ -34,6 +34,8 @@ class ArchiveProbe:
 
 SUPPORTED_ARCHIVE_SUFFIXES = {".zip", ".rar", ".7z"}
 SEVEN_ZIP_SPLIT_FIRST_RE = re.compile(r"^(?P<base>.+)\.7z\.001$", re.IGNORECASE)
+RAR_PART_RE = re.compile(r"^(?P<base>.+)\.part(?P<index>\d+)\.rar$", re.IGNORECASE)
+RAR_OLD_STYLE_PART_RE = re.compile(r"^(?P<base>.+)\.r(?P<index>\d{2,})$", re.IGNORECASE)
 ZIP_THREAD_RESERVE = 4
 ZIP_CHUNK_SIZE = 1024 * 1024
 
@@ -49,6 +51,15 @@ def archive_type_for_path(path: Path) -> str | None:
     name = path.name.lower()
     if SEVEN_ZIP_SPLIT_FIRST_RE.match(name):
         return "7z"
+    rar_part_match = RAR_PART_RE.match(name)
+    if rar_part_match:
+        try:
+            part_index = int(rar_part_match.group("index"))
+        except ValueError:
+            return None
+        return "rar" if part_index == 1 else None
+    if RAR_OLD_STYLE_PART_RE.match(name):
+        return None
     suffix = path.suffix.lower()
     if suffix in SUPPORTED_ARCHIVE_SUFFIXES:
         return suffix[1:]
@@ -63,6 +74,9 @@ def default_archive_target_name(path: Path) -> str:
     match = SEVEN_ZIP_SPLIT_FIRST_RE.match(path.name)
     if match:
         return match.group("base")
+    rar_part_match = RAR_PART_RE.match(path.name)
+    if rar_part_match:
+        return rar_part_match.group("base")
     archive_type = archive_type_for_path(path)
     if archive_type is None:
         raise ArchiveError("Only zip, rar, and 7z archives are supported.")
