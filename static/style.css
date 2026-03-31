@@ -740,6 +740,15 @@ button:disabled {
     gap: 12px;
 }
 
+.explorer-status-panel {
+    display: grid;
+    gap: 14px;
+}
+
+.explorer-job-list {
+    margin-top: 0;
+}
+
 .selection-cell {
     width: 52px;
 }

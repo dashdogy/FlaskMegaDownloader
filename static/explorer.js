@@ -18,6 +18,194 @@
     const compileDestinationSelect = document.getElementById("compile-destination");
     const compileDestinationInput = document.getElementById("compile-destination-path");
     const compileDestinationPreview = document.getElementById("compile-destination-preview");
+    const archiveJobList = document.getElementById("explorer-archive-job-list");
+    const archiveSummary = document.getElementById("explorer-archive-summary");
+    const initialArchivePayload = document.getElementById("initial-explorer-archives");
+    const pollMs = Number(document.body.dataset.pollMs || 1500);
+
+    const escapeHtml = (value) => String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+
+    const formatBytes = (value) => {
+        if (value === null || value === undefined) {
+            return "Unknown";
+        }
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let size = Number(value);
+        let index = 0;
+        while (size >= 1024 && index < units.length - 1) {
+            size /= 1024;
+            index += 1;
+        }
+        return index === 0 ? `${Math.round(size)} ${units[index]}` : `${size.toFixed(1)} ${units[index]}`;
+    };
+
+    const formatSpeed = (value) => value ? `${formatBytes(value)}/s` : "Unknown";
+
+    const formatEta = (value) => {
+        if (value === null || value === undefined) {
+            return "Estimating";
+        }
+        if (value <= 0) {
+            return "Done";
+        }
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.floor((value % 3600) / 60);
+        const seconds = Math.floor(value % 60);
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        }
+        if (minutes > 0) {
+            return `${minutes}m ${seconds}s`;
+        }
+        return `${seconds}s`;
+    };
+
+    const clampPercent = (value) => {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) {
+            return null;
+        }
+        return Math.max(0, Math.min(100, Number(value)));
+    };
+
+    const progressPercent = (transfer) => {
+        if (transfer?.bytes_total) {
+            return clampPercent((transfer.bytes_done / transfer.bytes_total) * 100);
+        }
+        return clampPercent(transfer?.percent);
+    };
+
+    const isStoppedStatus = (status) => status === "failed" || status === "canceled";
+    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting";
+
+    const buildProgressBar = (status, percent, indeterminate = false) => {
+        let trackClass = "progress-track";
+        let fillClass = "progress-fill";
+
+        if (isStoppedStatus(status)) {
+            trackClass += " failed";
+            fillClass += " failed";
+            const width = percent === null ? "100%" : `${percent.toFixed(1)}%`;
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:${width}"></div></div>`;
+        }
+
+        if (status === "completed") {
+            trackClass += " completed";
+            fillClass += " completed";
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:100%"></div></div>`;
+        }
+
+        if (status === "queued") {
+            return `<div class="${trackClass}"><div class="${fillClass}" style="width:0%"></div></div>`;
+        }
+
+        if (percent === null || indeterminate) {
+            return `<div class="${trackClass}"><div class="${fillClass} indeterminate"></div></div>`;
+        }
+
+        return `<div class="${trackClass}"><div class="${fillClass}" style="width:${percent.toFixed(1)}%"></div></div>`;
+    };
+
+    const pathWithinScope = (scope, relativePath) => {
+        const normalizedScope = String(scope || "").trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+        const normalizedRelativePath = String(relativePath || "").trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+        if (!normalizedScope) {
+            return true;
+        }
+        return normalizedRelativePath === normalizedScope || normalizedRelativePath.startsWith(`${normalizedScope}/`);
+    };
+
+    const currentArchiveRoot = archiveJobList?.dataset.root || "";
+    const currentArchivePath = archiveJobList?.dataset.currentPath || "";
+    const currentArchiveSort = archiveJobList?.dataset.sort || "name";
+
+    const filterRelevantArchiveJobs = (jobs) => jobs.filter((job) =>
+        job.root_key === currentArchiveRoot && (
+            pathWithinScope(currentArchivePath, job.archive_relative_path) ||
+            pathWithinScope(currentArchivePath, job.target_relative_path)
+        )
+    );
+
+    const renderArchiveJob = (job) => {
+        const percent = progressPercent(job.transfer);
+        const progressBar = buildProgressBar(job.status, percent, isArchiveActiveStatus(job.status) && percent === null);
+        const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
+        const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
+        const visibleMessage = String(job.transfer?.last_message || "") || "Waiting for worker output.";
+        const actions = job.can_cancel ? `
+            <form action="/archive-jobs/${encodeURIComponent(job.id)}/cancel" method="post">
+                <input type="hidden" name="root" value="${escapeHtml(currentArchiveRoot)}">
+                <input type="hidden" name="current_path" value="${escapeHtml(currentArchivePath)}">
+                <input type="hidden" name="sort" value="${escapeHtml(currentArchiveSort)}">
+                <button type="submit" class="danger-button compact-button">Cancel</button>
+            </form>
+        ` : "";
+
+        return `
+            <article class="job-card media-job-card">
+                <div class="job-header">
+                    <div>
+                        <strong>${escapeHtml(job.archive_display_name)}</strong>
+                        <p class="job-url">${escapeHtml(job.archive_relative_path)}</p>
+                    </div>
+                    <span class="status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status_label || job.status)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(String(job.archive_type || "").toUpperCase())}</span>
+                    <span>${escapeHtml(job.target_display || job.target_relative_path || job.target_path)}</span>
+                </div>
+                <div class="metric-row">
+                    <span>${escapeHtml(formatBytes(job.transfer?.bytes_done))}</span>
+                    <span>${escapeHtml(job.transfer?.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>
+                    <span>${escapeHtml(speedLabel)}</span>
+                    <span>${escapeHtml(etaLabel)}</span>
+                </div>
+                ${progressBar}
+                <div class="metric-row">
+                    <span>${escapeHtml(visibleMessage)}</span>
+                </div>
+                ${job.error ? `<div class="flash flash-error">${escapeHtml(job.error)}</div>` : ""}
+                ${actions ? `<div class="job-actions">${actions}</div>` : ""}
+            </article>
+        `;
+    };
+
+    const renderArchiveJobs = (jobs) => {
+        if (!archiveJobList || !archiveSummary) {
+            return;
+        }
+        const activeJobs = jobs.filter((job) => isArchiveActiveStatus(job.status)).length;
+        if (jobs.length === 0) {
+            archiveSummary.textContent = "No related archive jobs for this location yet.";
+            archiveJobList.innerHTML = '<div class="stat-tile"><span>No archive jobs here</span><strong>Nothing to monitor</strong><small class="subtle">Queue an archive extraction from this folder to see live status here.</small></div>';
+            return;
+        }
+        archiveSummary.textContent = `${jobs.length} related archive job(s), ${activeJobs} active.`;
+        archiveJobList.innerHTML = jobs.map(renderArchiveJob).join("");
+    };
+
+    const pollArchiveJobs = async () => {
+        if (!archiveJobList) {
+            return;
+        }
+        try {
+            const response = await fetch("/api/jobs", {
+                headers: { "Accept": "application/json" },
+                cache: "no-store",
+            });
+            if (!response.ok) {
+                return;
+            }
+            const payload = await response.json();
+            renderArchiveJobs(filterRelevantArchiveJobs(payload?.archives?.jobs || []));
+        } catch (error) {
+            console.debug("Explorer archive polling failed", error);
+        }
+    };
 
     const updateSelectionUi = () => {
         const selectedCount = entryCheckboxes.filter((checkbox) => checkbox.checked).length;
@@ -121,6 +309,17 @@
 
     if (compileButton && compileButton.disabled) {
         compileButton.dataset.locked = "true";
+    }
+
+    if (archiveJobList && initialArchivePayload) {
+        try {
+            const initialJobs = JSON.parse(initialArchivePayload.textContent || "[]");
+            renderArchiveJobs(initialJobs);
+        } catch (error) {
+            console.debug("Explorer archive payload could not be parsed", error);
+            renderArchiveJobs([]);
+        }
+        window.setInterval(pollArchiveJobs, pollMs);
     }
 
     updateSelectionUi();

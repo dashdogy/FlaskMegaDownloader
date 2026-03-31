@@ -77,6 +77,14 @@ def normalize_destination_path_input(raw_text: str) -> str:
     return normalize_user_path_input(raw_text)
 
 
+def path_within_scope(scope: str, relative_path: str) -> bool:
+    normalized_scope = str(scope or "").strip().replace("\\", "/").strip("/")
+    normalized_relative = str(relative_path or "").strip().replace("\\", "/").strip("/")
+    if not normalized_scope:
+        return True
+    return normalized_relative == normalized_scope or normalized_relative.startswith(f"{normalized_scope}/")
+
+
 def normalize_move_target_input(raw_text: str) -> str:
     return normalize_user_path_input(raw_text)
 
@@ -236,12 +244,33 @@ def create_app() -> Flask:
             fallback_root = destination_options[0]["key"]
             return redirect(url_for("explorer", root=fallback_root))
 
+        archive_dashboard = archive_manager.dashboard_payload()
+        explorer_archive_jobs = [
+            job
+            for job in archive_dashboard["jobs"]
+            if job["root_key"] == payload["root"]["key"]
+            and (
+                path_within_scope(payload["current_path"], job["archive_relative_path"])
+                or path_within_scope(payload["current_path"], job["target_relative_path"])
+            )
+        ]
+        explorer_archive_summary = {
+            "total_jobs": len(explorer_archive_jobs),
+            "queued_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "queued"),
+            "active_jobs": sum(1 for job in explorer_archive_jobs if job["status"] in {"probing", "extracting"}),
+            "completed_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "completed"),
+            "failed_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "failed"),
+            "canceled_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "canceled"),
+        }
+
         return render_template(
             "explorer.html",
             explorer=payload,
             move_favorites=move_favorite_options(),
             move_confirmation=move_confirmation,
             media_backend=media_manager.backend_payload(),
+            explorer_archive_jobs=explorer_archive_jobs,
+            explorer_archive_summary=explorer_archive_summary,
         )
 
     def extract_archives_in_folder(
@@ -443,6 +472,15 @@ def create_app() -> Flask:
         except ValueError as exc:
             flash(str(exc), "error")
         return redirect_back_or("dashboard")
+
+    @app.post("/archive-jobs/<job_id>/cancel")
+    def cancel_archive_job(job_id: str):
+        try:
+            archive_manager.cancel_job(job_id)
+            flash("Archive cancel request sent.", "success")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return post_context_redirect("dashboard")
 
     @app.post("/jobs/<job_id>/pause")
     def pause_job(job_id: str):

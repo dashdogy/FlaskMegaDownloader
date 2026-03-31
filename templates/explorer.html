@@ -205,6 +205,25 @@
             </div>
         </div>
 
+        <section class="explorer-status-panel">
+            <div class="explorer-table-header">
+                <div>
+                    <h3>Archive extraction status</h3>
+                    <p class="subtle" id="explorer-archive-summary">
+                        {{ explorer_archive_jobs|length }} related archive job(s) for this location.
+                    </p>
+                </div>
+            </div>
+            <div
+                id="explorer-archive-job-list"
+                class="job-list explorer-job-list"
+                data-root="{{ explorer.root.key }}"
+                data-current-path="{{ explorer.current_path }}"
+                data-sort="{{ explorer.sort }}"
+            ></div>
+            <script id="initial-explorer-archives" type="application/json">{{ explorer_archive_jobs|tojson }}</script>
+        </section>
+
         <div class="explorer-table-wrap">
             <table class="explorer-table">
                 <thead>

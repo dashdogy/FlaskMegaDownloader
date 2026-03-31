@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 from typing import Callable
 
 import pyzipper
+from process_utils import stop_process
 try:
     import rarfile
 except ImportError:  # pragma: no cover - exercised via runtime availability checks
@@ -22,6 +23,10 @@ except ImportError:  # pragma: no cover - exercised via runtime availability che
 
 
 class ArchiveError(Exception):
+    pass
+
+
+class ArchiveCanceledError(ArchiveError):
     pass
 
 
@@ -130,6 +135,11 @@ def _member_size(member) -> int:
 
 def _archive_members(archive) -> list:
     return list(archive.infolist())
+
+
+def _raise_if_canceled(cancel_requested: Callable[[], bool] | None) -> None:
+    if cancel_requested and cancel_requested():
+        raise ArchiveCanceledError("Archive extraction canceled.")
 
 
 def _read_text_if_exists(path: Path) -> str | None:
@@ -269,6 +279,7 @@ def _extract_zip_member_with_archive(
     progress_callback: Callable[..., None] | None = None,
     progress_lock: threading.Lock | None = None,
     progress_state: dict[str, int] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
     try:
         with archive_factory(archive_path) as archive:
@@ -276,6 +287,7 @@ def _extract_zip_member_with_archive(
                 archive.setpassword(password)
             with archive.open(entry.member_name) as source, entry.target_path.open("wb") as handle:
                 while True:
+                    _raise_if_canceled(cancel_requested)
                     chunk = source.read(ZIP_CHUNK_SIZE)
                     if not chunk:
                         break
@@ -300,6 +312,7 @@ def _extract_single_zip_member(
     progress_callback: Callable[..., None] | None = None,
     progress_lock: threading.Lock | None = None,
     progress_state: dict[str, int] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> None:
     zip_error: Exception | None = None
     try:
@@ -311,6 +324,7 @@ def _extract_single_zip_member(
             progress_callback=progress_callback,
             progress_lock=progress_lock,
             progress_state=progress_state,
+            cancel_requested=cancel_requested,
         )
         return
     except (RuntimeError, NotImplementedError, zipfile.BadZipFile, KeyError) as exc:
@@ -325,6 +339,7 @@ def _extract_single_zip_member(
             progress_callback=progress_callback,
             progress_lock=progress_lock,
             progress_state=progress_state,
+            cancel_requested=cancel_requested,
         )
     except (RuntimeError, NotImplementedError, zipfile.BadZipFile, pyzipper.zipfile.BadZipFile, KeyError) as exc:
         raise ArchiveError(str(exc)) from zip_error or exc
@@ -336,6 +351,7 @@ def _extract_zip_archive(
     *,
     password: str | None = None,
     progress_callback: Callable[..., None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[str]:
     encoded_password = password.encode("utf-8") if password else None
 
@@ -366,6 +382,7 @@ def _extract_zip_archive(
 
     if worker_count == 1 or len(file_targets) <= 1:
         for entry in file_targets:
+            _raise_if_canceled(cancel_requested)
             _extract_single_zip_member(
                 archive_path,
                 entry,
@@ -373,6 +390,7 @@ def _extract_zip_archive(
                 progress_callback=progress_callback,
                 progress_lock=progress_lock,
                 progress_state=progress_state,
+                cancel_requested=cancel_requested,
             )
         return [str(entry.target_path) for entry in file_targets]
 
@@ -386,6 +404,7 @@ def _extract_zip_archive(
                 progress_callback=progress_callback,
                 progress_lock=progress_lock,
                 progress_state=progress_state,
+                cancel_requested=cancel_requested,
             )
             for entry in file_targets
         ]
@@ -401,6 +420,7 @@ def _extract_with_reader(
     password: bytes | str | None = None,
     *,
     progress_callback: Callable[..., None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[str]:
     extracted: list[str] = []
     if password and hasattr(archive, "setpassword"):
@@ -411,6 +431,7 @@ def _extract_with_reader(
     if progress_callback:
         progress_callback(bytes_done=0, bytes_total=total_bytes)
     for member in members:
+        _raise_if_canceled(cancel_requested)
         member_name = _member_name(member)
         target_path = _safe_target_path(destination_dir, member_name)
         if _member_is_dir(member):
@@ -418,15 +439,20 @@ def _extract_with_reader(
             continue
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with archive.open(member) as source, target_path.open("wb") as handle:
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                copied_bytes += len(chunk)
-                if progress_callback:
-                    progress_callback(bytes_done=copied_bytes, bytes_total=total_bytes)
+        try:
+            with archive.open(member) as source, target_path.open("wb") as handle:
+                while True:
+                    _raise_if_canceled(cancel_requested)
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    copied_bytes += len(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_done=copied_bytes, bytes_total=total_bytes)
+        except Exception:
+            target_path.unlink(missing_ok=True)
+            raise
         extracted.append(str(target_path))
     return extracted
 
@@ -579,6 +605,7 @@ def _extract_7z_archive(
     seven_zip_binary: str,
     password: str | None = None,
     progress_callback: Callable[..., None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[str]:
     entries = _list_7z_entries(archive_path, seven_zip_binary=seven_zip_binary, password=password)
     total_bytes = sum(int(entry["size"]) for entry in entries if not entry["is_dir"])
@@ -603,6 +630,9 @@ def _extract_7z_archive(
         if progress_callback:
             progress_callback(bytes_done=0, bytes_total=total_bytes)
         while process.poll() is None:
+            if cancel_requested and cancel_requested():
+                stop_process(process)
+                raise ArchiveCanceledError("Archive extraction canceled.")
             if progress_callback:
                 progress_callback(
                     bytes_done=min(_directory_size_bytes(staging_dir), total_bytes),
@@ -625,6 +655,7 @@ def extract_archive(
     *,
     seven_zip_binary: str = "7z",
     progress_callback: Callable[..., None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[str]:
     archive_path = archive_path.resolve()
     destination_dir = destination_dir.resolve()
@@ -639,6 +670,7 @@ def extract_archive(
             destination_dir,
             password=password,
             progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
         )
 
     if archive_type == "7z":
@@ -648,6 +680,7 @@ def extract_archive(
             seven_zip_binary=seven_zip_binary,
             password=password,
             progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
         )
 
     if rarfile is None:
@@ -660,6 +693,7 @@ def extract_archive(
                 destination_dir,
                 password=password,
                 progress_callback=progress_callback,
+                cancel_requested=cancel_requested,
             )
     except rarfile.Error as exc:
         message = str(exc)

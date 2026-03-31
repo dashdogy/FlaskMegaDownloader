@@ -8,8 +8,8 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
-from archives import ArchiveError, extract_archive, probe_archive
-from models import ACTIVE_ARCHIVE_JOB_STATUSES, ARCHIVE_JOB_STATUSES, ArchiveJob, TransferStatus, utcnow_iso
+from archives import ArchiveCanceledError, ArchiveError, extract_archive, probe_archive
+from models import ACTIVE_ARCHIVE_JOB_STATUSES, ARCHIVE_JOB_STATUSES, ArchiveJob, RETRYABLE_ARCHIVE_JOB_STATUSES, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
 
@@ -26,6 +26,7 @@ class ArchiveExtractManager:
         self._worker = threading.Thread(target=self._worker_loop, name="archive-extract-worker", daemon=True)
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._summary_throughput_sample: tuple[float, tuple[str, ...], int] | None = None
+        self._cancel_events: dict[str, threading.Event] = {}
         self._jobs: dict[str, ArchiveJob] = {}
         self._last_persist = 0.0
         self._load_jobs()
@@ -99,6 +100,32 @@ class ArchiveExtractManager:
             self._persist_locked(force=True)
         return created
 
+    def cancel_job(self, job_id: str) -> ArchiveJob:
+        with self._lock:
+            job = self._require_job(job_id)
+            if job.status == "queued":
+                job.status = "canceled"
+                job.error = "Canceled before extraction started."
+                job.transfer.finished_at = utcnow_iso()
+                job.append_output("Archive extraction canceled before start.")
+                job.archive_password = None
+                job.touch()
+                self._cancel_events.pop(job_id, None)
+                self._rebuild_queue_locked()
+                self._persist_locked(force=True)
+                return job
+            if job.status not in ACTIVE_ARCHIVE_JOB_STATUSES:
+                raise ValueError("Only queued or active archive jobs can be canceled.")
+
+            cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
+            if not cancel_event.is_set():
+                cancel_event.set()
+                job.error = "Cancel request sent."
+                job.append_output("Canceling archive extraction...")
+                job.touch()
+                self._persist_locked(force=True)
+            return job
+
     def dashboard_payload(self) -> dict:
         with self._lock:
             queued_job_ids = self._queued_job_ids_locked()
@@ -123,6 +150,7 @@ class ArchiveExtractManager:
             "active_jobs": 0,
             "completed_jobs": 0,
             "failed_jobs": 0,
+            "canceled_jobs": 0,
             "throughput_bps": summary_throughput_bps or 0.0,
             "bytes_done": 0,
             "bytes_total": 0,
@@ -138,6 +166,8 @@ class ArchiveExtractManager:
                 summary["completed_jobs"] += 1
             elif job["status"] == "failed":
                 summary["failed_jobs"] += 1
+            elif job["status"] == "canceled":
+                summary["canceled_jobs"] += 1
             summary["bytes_done"] += job["transfer"]["bytes_done"]
             if job["transfer"]["bytes_total"] is None:
                 summary["has_unknown_total"] = True
@@ -180,6 +210,11 @@ class ArchiveExtractManager:
         payload = job.to_dict()
         payload["target_display"] = job.target_relative_path or Path(job.target_path).name
         payload["status_label"] = job.status.replace("_", " ").title()
+        cancel_event = self._cancel_events.get(job.id)
+        payload["can_cancel"] = (
+            job.status == "queued" or job.status in ACTIVE_ARCHIVE_JOB_STATUSES
+        ) and not (cancel_event and cancel_event.is_set())
+        payload["can_retry"] = job.status in RETRYABLE_ARCHIVE_JOB_STATUSES
         return payload
 
     def _worker_loop(self) -> None:
@@ -195,6 +230,7 @@ class ArchiveExtractManager:
                     if not job or job.status != "queued":
                         continue
                     self._progress_samples[job_id] = (time.monotonic(), 0)
+                    cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
                     job.status = "probing"
                     job.error = None
                     job.transfer.started_at = utcnow_iso()
@@ -221,6 +257,8 @@ class ArchiveExtractManager:
                         bytes_total=probe.bytes_total,
                         message="Archive inspection finished.",
                     )
+                    if cancel_event.is_set():
+                        raise ArchiveCanceledError("Archive extraction canceled.")
                     self._update_job(
                         job.id,
                         status="extracting",
@@ -233,7 +271,11 @@ class ArchiveExtractManager:
                         password=job.archive_password,
                         seven_zip_binary=self.seven_zip_binary,
                         progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
+                        cancel_requested=cancel_event.is_set,
                     )
+                except ArchiveCanceledError as exc:
+                    final_status = "canceled"
+                    final_error = str(exc)
                 except Exception as exc:
                     final_status = "failed"
                     final_error = str(exc)
@@ -248,6 +290,7 @@ class ArchiveExtractManager:
             finally:
                 with self._lock:
                     self._progress_samples.pop(job_id, None)
+                    self._cancel_events.pop(job_id, None)
 
     def _update_job(self, job_id: str, **kwargs) -> None:
         with self._lock:
@@ -317,6 +360,9 @@ class ArchiveExtractManager:
                 job.transfer.percent = 100.0
                 job.transfer.eta_seconds = 0
                 job.append_output("Archive extraction finished.")
+            elif status == "canceled":
+                job.append_output(error or "Archive extraction canceled.")
+                job.transfer.eta_seconds = None
             else:
                 job.append_output(error or "Archive extraction failed.")
             job.transfer.speed_bps = None

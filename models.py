@@ -37,9 +37,10 @@ ARCHIVE_JOB_STATUSES = {
     "extracting",
     "completed",
     "failed",
+    "canceled",
 }
 ACTIVE_ARCHIVE_JOB_STATUSES = {"probing", "extracting"}
-RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed"}
+RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed", "canceled"}
 
 
 def utcnow_iso() -> str:

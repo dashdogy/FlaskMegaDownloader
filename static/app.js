@@ -294,6 +294,7 @@
             ["Active", summary.active_jobs],
             ["Completed", summary.completed_jobs],
             ["Failed", summary.failed_jobs],
+            ["Canceled", summary.canceled_jobs ?? 0],
             ["Extract Speed", formatSpeed(summary.throughput_bps)],
         ].map(([label, value]) => `
             <div class="stat-tile">
@@ -484,6 +485,13 @@
         const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
         const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";
+        const actions = [
+            job.can_cancel ? `
+                <form action="/archive-jobs/${encodeURIComponent(job.id)}/cancel" method="post">
+                    <button type="submit" class="danger-button compact-button">Cancel</button>
+                </form>
+            ` : "",
+        ].join("");
 
         return `
             <article class="job-card media-job-card">
@@ -509,6 +517,7 @@
                     <span>${escapeHtml(visibleMessage)}</span>
                 </div>
                 ${job.error ? `<div class="flash flash-error">${escapeHtml(job.error)}</div>` : ""}
+                ${actions ? `<div class="job-actions">${actions}</div>` : ""}
             </article>
         `;
     };
