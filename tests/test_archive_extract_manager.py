@@ -12,7 +12,7 @@ from unittest.mock import patch
 import app as app_module
 from archive_extract_manager import ArchiveExtractManager
 from archive_auto_sort import ArchiveSortSummary
-from archives import ArchiveCanceledError, ArchiveError, ArchiveProbe
+from archives import ArchiveCanceledError, ArchiveDeleteSummary, ArchiveError, ArchiveProbe
 from models import MoveFavorite, utcnow_iso
 from storage import SQLiteStorage
 
@@ -67,7 +67,7 @@ class FakeArchiveExtractManager:
             "summary": {
                 "total_jobs": len(self.dashboard_jobs),
                 "queued_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "queued"),
-                "active_jobs": sum(1 for job in self.dashboard_jobs if job["status"] in {"probing", "extracting", "sorting"}),
+                "active_jobs": sum(1 for job in self.dashboard_jobs if job["status"] in {"probing", "extracting", "sorting", "cleaning"}),
                 "completed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "completed"),
                 "failed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "failed"),
                 "canceled_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "canceled"),
@@ -302,6 +302,167 @@ class ArchiveExtractManagerTests(unittest.TestCase):
                 self.assertEqual(observed["tv_target_path"], tv_target)
                 self.assertEqual(job.sort_summary["moved_tv"], 1)
                 self.assertTrue(any("Auto-sort finished" in line for line in job.output_tail))
+            finally:
+                manager.stop()
+                manager._worker.join(timeout=1.0)
+
+    def test_auto_delete_runs_after_successful_auto_sort_move(self) -> None:
+        with TemporaryDirectory(prefix="archive-manager-auto-delete-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            storage = SQLiteStorage(root / "state.sqlite3")
+            manager = ArchiveExtractManager(storage, seven_zip_binary="7z-test")
+            archive_path = root / "sample.part1.rar"
+            archive_path.write_bytes(b"part1")
+            target_path = root / "output"
+            movies_target = root / "Movies"
+            tv_target = root / "TvShows"
+
+            cleanup_started = threading.Event()
+
+            def fake_probe(path: Path, *, password: str | None = None, seven_zip_binary: str = "7z") -> ArchiveProbe:
+                return ArchiveProbe(archive_type="rar", bytes_total=4096, entry_count=1)
+
+            def fake_extract(
+                path: Path,
+                destination: Path,
+                password: str | None = None,
+                *,
+                seven_zip_binary: str = "7z",
+                progress_callback=None,
+                cancel_requested=None,
+            ) -> list[str]:
+                destination.mkdir(parents=True, exist_ok=True)
+                extracted = destination / "Movie.Name.2024.mkv"
+                extracted.write_bytes(b"movie")
+                if progress_callback:
+                    progress_callback(bytes_done=4096, bytes_total=4096)
+                return [str(extracted)]
+
+            def fake_sort(
+                extracted_paths,
+                *,
+                movies_target_path: Path,
+                tv_target_path: Path,
+                cancel_requested=None,
+            ) -> ArchiveSortSummary:
+                return ArchiveSortSummary(moved_movies=1)
+
+            def fake_delete(path: Path, *, cancel_requested=None) -> ArchiveDeleteSummary:
+                cleanup_started.set()
+                self.assertEqual(path, archive_path)
+                return ArchiveDeleteSummary(
+                    deleted_paths=[str(archive_path), str(root / "sample.part2.rar")],
+                    failed_paths=[],
+                )
+
+            try:
+                with (
+                    patch("archive_extract_manager.probe_archive", side_effect=fake_probe),
+                    patch("archive_extract_manager.extract_archive", side_effect=fake_extract),
+                    patch("archive_extract_manager.sort_extracted_videos", side_effect=fake_sort),
+                    patch("archive_extract_manager.delete_archive_source_files", side_effect=fake_delete),
+                ):
+                    jobs = manager.submit(
+                        [
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "sample.part1.rar",
+                                "archive_path": str(archive_path),
+                                "archive_display_name": "sample.part1.rar",
+                                "archive_type": "rar",
+                                "target_relative_path": "sample",
+                                "target_path": str(target_path),
+                                "auto_sort_enabled": True,
+                                "auto_delete_enabled": True,
+                                "movies_target_path": str(movies_target),
+                                "tv_target_path": str(tv_target),
+                            }
+                        ]
+                    )
+                    job_id = jobs[0].id
+
+                    self.assertTrue(cleanup_started.wait(1.0))
+                    self.assertTrue(wait_for(lambda: manager._jobs[job_id].status == "completed"))
+
+                job = manager._jobs[job_id]
+                self.assertTrue(job.auto_delete_enabled)
+                self.assertEqual(job.auto_delete_summary["deleted_count"], 2)
+                self.assertEqual(job.auto_delete_summary["failed_count"], 0)
+                self.assertTrue(any("Auto-delete deleted 2 archive file(s)." in line for line in job.output_tail))
+            finally:
+                manager.stop()
+                manager._worker.join(timeout=1.0)
+
+    def test_auto_delete_keeps_source_archives_when_no_video_was_moved(self) -> None:
+        with TemporaryDirectory(prefix="archive-manager-auto-delete-keep-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            storage = SQLiteStorage(root / "state.sqlite3")
+            manager = ArchiveExtractManager(storage, seven_zip_binary="7z-test")
+            archive_path = root / "sample.zip"
+            archive_path.write_bytes(b"zip")
+            target_path = root / "output"
+            movies_target = root / "Movies"
+            tv_target = root / "TvShows"
+
+            def fake_probe(path: Path, *, password: str | None = None, seven_zip_binary: str = "7z") -> ArchiveProbe:
+                return ArchiveProbe(archive_type="zip", bytes_total=4096, entry_count=1)
+
+            def fake_extract(
+                path: Path,
+                destination: Path,
+                password: str | None = None,
+                *,
+                seven_zip_binary: str = "7z",
+                progress_callback=None,
+                cancel_requested=None,
+            ) -> list[str]:
+                destination.mkdir(parents=True, exist_ok=True)
+                extracted = destination / "Readme.txt"
+                extracted.write_bytes(b"text")
+                if progress_callback:
+                    progress_callback(bytes_done=4096, bytes_total=4096)
+                return [str(extracted)]
+
+            def fake_sort(
+                extracted_paths,
+                *,
+                movies_target_path: Path,
+                tv_target_path: Path,
+                cancel_requested=None,
+            ) -> ArchiveSortSummary:
+                return ArchiveSortSummary(skipped_non_video=1)
+
+            try:
+                with (
+                    patch("archive_extract_manager.probe_archive", side_effect=fake_probe),
+                    patch("archive_extract_manager.extract_archive", side_effect=fake_extract),
+                    patch("archive_extract_manager.sort_extracted_videos", side_effect=fake_sort),
+                    patch("archive_extract_manager.delete_archive_source_files") as delete_mock,
+                ):
+                    jobs = manager.submit(
+                        [
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "sample.zip",
+                                "archive_path": str(archive_path),
+                                "archive_display_name": "sample.zip",
+                                "archive_type": "zip",
+                                "target_relative_path": "sample",
+                                "target_path": str(target_path),
+                                "auto_sort_enabled": True,
+                                "auto_delete_enabled": True,
+                                "movies_target_path": str(movies_target),
+                                "tv_target_path": str(tv_target),
+                            }
+                        ]
+                    )
+                    job_id = jobs[0].id
+                    self.assertTrue(wait_for(lambda: manager._jobs[job_id].status == "completed"))
+
+                delete_mock.assert_not_called()
+                job = manager._jobs[job_id]
+                self.assertEqual(job.auto_delete_summary["kept_reason"], "no_videos_moved")
+                self.assertTrue(any("Kept source archives because no video files were moved." in line for line in job.output_tail))
             finally:
                 manager.stop()
                 manager._worker.join(timeout=1.0)
@@ -586,6 +747,7 @@ class ArchiveRequestPathTests(unittest.TestCase):
                         "sort": "name",
                         "selected_paths": "sample.zip",
                         "auto_sort_extracted_videos": "1",
+                        "auto_delete_source_archives": "1",
                     },
                 )
 
@@ -594,6 +756,7 @@ class ArchiveRequestPathTests(unittest.TestCase):
                 self.assertIsNotNone(manager)
                 prepared_job = manager.submitted[0][0]
                 self.assertTrue(prepared_job["auto_sort_enabled"])
+                self.assertTrue(prepared_job["auto_delete_enabled"])
                 self.assertEqual(prepared_job["movies_target_path"], str(movies_dir.resolve()))
                 self.assertEqual(prepared_job["tv_target_path"], str(tv_dir.resolve()))
 

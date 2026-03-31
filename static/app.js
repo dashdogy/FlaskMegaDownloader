@@ -156,7 +156,7 @@
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
-    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting";
+    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting" || status === "cleaning";
     const isMediaActiveStatus = (status) => status === "scanning" || status === "compiling" || status === "verifying";
 
     const progressPercent = (transfer) => {
@@ -486,12 +486,20 @@
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
         const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";
         const sortSummary = job.sort_summary || {};
+        const autoDeleteSummary = job.auto_delete_summary || {};
         const sortSummaryParts = [
             sortSummary.moved_movies ? `${sortSummary.moved_movies} to Movies` : "",
             sortSummary.moved_tv ? `${sortSummary.moved_tv} to TvShows` : "",
             sortSummary.skipped_unclear ? `${sortSummary.skipped_unclear} unclear` : "",
             sortSummary.skipped_conflict ? `${sortSummary.skipped_conflict} conflict` : "",
             sortSummary.failed ? `${sortSummary.failed} failed` : "",
+        ].filter(Boolean);
+        const deletedCount = Number(autoDeleteSummary.deleted_count ?? autoDeleteSummary.deleted_paths?.length ?? 0);
+        const failedDeleteCount = Number(autoDeleteSummary.failed_count ?? autoDeleteSummary.failed_paths?.length ?? 0);
+        const autoDeleteParts = [
+            deletedCount ? `deleted ${deletedCount}` : "",
+            failedDeleteCount ? `${failedDeleteCount} failed` : "",
+            autoDeleteSummary.kept_reason === "no_videos_moved" ? "kept source archives" : "",
         ].filter(Boolean);
         const actions = [
             job.can_cancel ? `
@@ -518,6 +526,12 @@
                     <div class="metric-row">
                         <span>Auto-sort</span>
                         <span>${escapeHtml(sortSummaryParts.join(" | ") || "Movies / TvShows favorites")}</span>
+                    </div>
+                ` : ""}
+                ${job.auto_delete_enabled ? `
+                    <div class="metric-row">
+                        <span>Auto-delete</span>
+                        <span>${escapeHtml(autoDeleteParts.join(" | ") || "Waiting for auto-sort result")}</span>
                     </div>
                 ` : ""}
                 <div class="metric-row">

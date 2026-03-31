@@ -14,8 +14,11 @@ import pyzipper
 from archives import (
     ArchiveError,
     archive_type_for_path,
+    build_auto_delete_summary_message,
+    delete_archive_source_files,
     detect_effective_cpu_count,
     default_archive_target_name,
+    discover_related_archive_files,
     extract_archive,
     is_supported_archive_path,
     zip_extraction_worker_count,
@@ -157,6 +160,49 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(default_archive_target_name(Path("movie.part01.rar")), "movie")
         self.assertEqual(default_archive_target_name(Path("movie.7z")), "movie")
         self.assertEqual(default_archive_target_name(Path("movie.7z.001")), "movie")
+
+    def test_discover_related_archive_files_for_split_sets(self) -> None:
+        with TemporaryDirectory(prefix="archive-related-files-") as temp_dir:
+            root = Path(temp_dir)
+            rar_first = root / "movie.part1.rar"
+            rar_second = root / "movie.part2.rar"
+            rar_old = root / "movie.r00"
+            seven_zip_first = root / "series.7z.001"
+            seven_zip_second = root / "series.7z.002"
+            standalone_zip = root / "standalone.zip"
+            for path in (rar_first, rar_second, rar_old, seven_zip_first, seven_zip_second, standalone_zip):
+                path.write_bytes(b"part")
+
+            rar_related = [path.name for path in discover_related_archive_files(rar_first)]
+            seven_zip_related = [path.name for path in discover_related_archive_files(seven_zip_first)]
+            zip_related = [path.name for path in discover_related_archive_files(standalone_zip)]
+
+        self.assertEqual(rar_related, ["movie.part1.rar", "movie.part2.rar", "movie.r00"])
+        self.assertEqual(seven_zip_related, ["series.7z.001", "series.7z.002"])
+        self.assertEqual(zip_related, ["standalone.zip"])
+
+    def test_delete_archive_source_files_removes_related_split_parts(self) -> None:
+        with TemporaryDirectory(prefix="archive-delete-files-") as temp_dir:
+            root = Path(temp_dir)
+            first = root / "movie.7z.001"
+            second = root / "movie.7z.002"
+            third = root / "movie.7z.003"
+            for path in (first, second, third):
+                path.write_bytes(b"part")
+
+            summary = delete_archive_source_files(first)
+
+            self.assertEqual(summary.to_dict()["deleted_count"], 3)
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+            self.assertFalse(third.exists())
+
+    def test_auto_delete_summary_message_handles_kept_reason(self) -> None:
+        summary = archives.ArchiveDeleteSummary(deleted_paths=[], failed_paths=[], kept_reason="no_videos_moved")
+        self.assertEqual(
+            build_auto_delete_summary_message(summary),
+            "Kept source archives because no video files were moved.",
+        )
 
     def test_explorer_marks_only_first_7z_volume_as_extractable(self) -> None:
         with TemporaryDirectory(prefix="archive-explorer-") as temp_dir:

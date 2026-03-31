@@ -9,7 +9,15 @@ from pathlib import Path
 from queue import Empty, Queue
 
 from archive_auto_sort import ArchiveAutoSortError, build_sort_summary_message, sort_extracted_videos
-from archives import ArchiveCanceledError, ArchiveError, extract_archive, probe_archive
+from archives import (
+    ArchiveCanceledError,
+    ArchiveDeleteSummary,
+    ArchiveError,
+    build_auto_delete_summary_message,
+    delete_archive_source_files,
+    extract_archive,
+    probe_archive,
+)
 from models import ACTIVE_ARCHIVE_JOB_STATUSES, ARCHIVE_JOB_STATUSES, ArchiveJob, RETRYABLE_ARCHIVE_JOB_STATUSES, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
@@ -109,6 +117,8 @@ class ArchiveExtractManager:
                     target_path=prepared["target_path"],
                     archive_password=prepared.get("archive_password"),
                     auto_sort_enabled=bool(prepared.get("auto_sort_enabled", False)),
+                    auto_delete_enabled=bool(prepared.get("auto_delete_enabled", False))
+                    and bool(prepared.get("auto_sort_enabled", False)),
                     movies_target_path=prepared.get("movies_target_path"),
                     tv_target_path=prepared.get("tv_target_path"),
                     transfer=TransferStatus(bytes_total=prepared.get("bytes_total")),
@@ -123,8 +133,21 @@ class ArchiveExtractManager:
                 "queued",
                 "Queued archive extraction jobs.",
                 job=created[0],
-                context={"job_count": len(created), "archive_type": created[0].archive_type},
+                context={
+                    "job_count": len(created),
+                    "archive_type": created[0].archive_type,
+                    "auto_sort_enabled": created[0].auto_sort_enabled,
+                    "auto_delete_enabled": created[0].auto_delete_enabled,
+                },
             )
+            if created[0].auto_delete_enabled:
+                self._log(
+                    "info",
+                    "auto_delete",
+                    "Archive auto-delete requested for queued archive jobs.",
+                    job=created[0],
+                    context={"job_count": len(created)},
+                )
         return created
 
     def cancel_job(self, job_id: str) -> ArchiveJob:
@@ -347,6 +370,57 @@ class ArchiveExtractManager:
                             message=build_sort_summary_message(sort_summary),
                         )
                         self._log("info", "auto_sort", build_sort_summary_message(sort_summary), job=job, context=sort_summary.to_dict())
+                        if job.auto_delete_enabled:
+                            moved_count = sort_summary.moved_movies + sort_summary.moved_tv
+                            if moved_count > 0:
+                                self._update_job(
+                                    job.id,
+                                    status="cleaning",
+                                    message="Deleting source archive files...",
+                                )
+                                self._log("info", "auto_delete", "Archive auto-delete started.", job=job)
+                                delete_summary = delete_archive_source_files(
+                                    Path(job.archive_path),
+                                    cancel_requested=cancel_event.is_set,
+                                )
+                            else:
+                                delete_summary = ArchiveDeleteSummary(
+                                    deleted_paths=[],
+                                    failed_paths=[],
+                                    kept_reason="no_videos_moved",
+                                )
+
+                            delete_summary_message = build_auto_delete_summary_message(delete_summary)
+                            self._update_job(
+                                job.id,
+                                status="cleaning" if moved_count > 0 else "sorting",
+                                auto_delete_summary=delete_summary.to_dict(),
+                                message=delete_summary_message,
+                            )
+                            if delete_summary.kept_reason == "no_videos_moved":
+                                self._log(
+                                    "info",
+                                    "auto_delete",
+                                    "Archive auto-delete kept source archives because no video files were moved.",
+                                    job=job,
+                                    context=delete_summary.to_dict(),
+                                )
+                            elif delete_summary.failed_paths:
+                                self._log(
+                                    "warning",
+                                    "auto_delete",
+                                    "Archive auto-delete completed with cleanup failures.",
+                                    job=job,
+                                    context=delete_summary.to_dict(),
+                                )
+                            else:
+                                self._log(
+                                    "info",
+                                    "auto_delete",
+                                    f"Archive auto-delete deleted {len(delete_summary.deleted_paths)} source archive file(s).",
+                                    job=job,
+                                    context=delete_summary.to_dict(),
+                                )
                 except ArchiveCanceledError as exc:
                     final_status = "canceled"
                     final_error = str(exc)
@@ -392,6 +466,8 @@ class ArchiveExtractManager:
                 transfer.eta_seconds = kwargs["eta_seconds"]
             if "sort_summary" in kwargs and kwargs["sort_summary"] is not None:
                 job.sort_summary = dict(kwargs["sort_summary"])
+            if "auto_delete_summary" in kwargs and kwargs["auto_delete_summary"] is not None:
+                job.auto_delete_summary = dict(kwargs["auto_delete_summary"])
             message = kwargs.get("message")
             if message:
                 job.append_output(str(message))

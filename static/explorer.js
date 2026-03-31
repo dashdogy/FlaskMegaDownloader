@@ -15,6 +15,8 @@
     const moveTargetInput = document.getElementById("move-target-path");
     const savedMoveTargetSelect = document.getElementById("saved-move-target");
     const savedMoveTargetPreview = document.getElementById("saved-move-target-preview");
+    const autoSortCheckbox = document.getElementById("auto-sort-extracted-videos");
+    const autoDeleteCheckbox = document.getElementById("auto-delete-source-archives");
     const compileDestinationSelect = document.getElementById("compile-destination");
     const compileDestinationInput = document.getElementById("compile-destination-path");
     const compileDestinationPreview = document.getElementById("compile-destination-preview");
@@ -22,6 +24,7 @@
     const archiveSummary = document.getElementById("explorer-archive-summary");
     const initialArchivePayload = document.getElementById("initial-explorer-archives");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
+    const archiveAutomationStorageKey = `explorer-archive-automation:${window.location.pathname}`;
 
     const escapeHtml = (value) => String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -80,7 +83,35 @@
     };
 
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
-    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting";
+    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting" || status === "cleaning";
+
+    const readArchiveAutomationState = () => {
+        try {
+            const rawValue = localStorage.getItem(archiveAutomationStorageKey);
+            if (!rawValue) {
+                return null;
+            }
+            const parsed = JSON.parse(rawValue);
+            return {
+                autoSortEnabled: Boolean(parsed?.autoSortEnabled),
+                autoDeleteEnabled: Boolean(parsed?.autoDeleteEnabled),
+            };
+        } catch (error) {
+            console.debug("Explorer archive automation state could not be restored", error);
+            return null;
+        }
+    };
+
+    const writeArchiveAutomationState = () => {
+        try {
+            localStorage.setItem(archiveAutomationStorageKey, JSON.stringify({
+                autoSortEnabled: Boolean(autoSortCheckbox?.checked),
+                autoDeleteEnabled: Boolean(autoDeleteCheckbox?.checked),
+            }));
+        } catch (error) {
+            console.debug("Explorer archive automation state could not be saved", error);
+        }
+    };
 
     const buildProgressBar = (status, percent, indeterminate = false) => {
         let trackClass = "progress-track";
@@ -137,12 +168,20 @@
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
         const visibleMessage = String(job.transfer?.last_message || "") || "Waiting for worker output.";
         const sortSummary = job.sort_summary || {};
+        const autoDeleteSummary = job.auto_delete_summary || {};
         const sortSummaryParts = [
             sortSummary.moved_movies ? `${sortSummary.moved_movies} to Movies` : "",
             sortSummary.moved_tv ? `${sortSummary.moved_tv} to TvShows` : "",
             sortSummary.skipped_unclear ? `${sortSummary.skipped_unclear} unclear` : "",
             sortSummary.skipped_conflict ? `${sortSummary.skipped_conflict} conflict` : "",
             sortSummary.failed ? `${sortSummary.failed} failed` : "",
+        ].filter(Boolean);
+        const deletedCount = Number(autoDeleteSummary.deleted_count ?? autoDeleteSummary.deleted_paths?.length ?? 0);
+        const failedDeleteCount = Number(autoDeleteSummary.failed_count ?? autoDeleteSummary.failed_paths?.length ?? 0);
+        const autoDeleteParts = [
+            deletedCount ? `deleted ${deletedCount}` : "",
+            failedDeleteCount ? `${failedDeleteCount} failed` : "",
+            autoDeleteSummary.kept_reason === "no_videos_moved" ? "kept source archives" : "",
         ].filter(Boolean);
         const actions = job.can_cancel ? `
             <form action="/archive-jobs/${encodeURIComponent(job.id)}/cancel" method="post">
@@ -170,6 +209,12 @@
                     <div class="metric-row">
                         <span>Auto-sort</span>
                         <span>${escapeHtml(sortSummaryParts.join(" | ") || "Movies / TvShows favorites")}</span>
+                    </div>
+                ` : ""}
+                ${job.auto_delete_enabled ? `
+                    <div class="metric-row">
+                        <span>Auto-delete</span>
+                        <span>${escapeHtml(autoDeleteParts.join(" | ") || "Waiting for auto-sort result")}</span>
                     </div>
                 ` : ""}
                 <div class="metric-row">
@@ -226,6 +271,7 @@
         const totalCount = entryCheckboxes.length;
         const hasMoveTarget = Boolean(moveTargetInput?.value.trim());
         const hasDestinationPath = Boolean(compileDestinationInput?.value.trim());
+        const autoSortEnabled = Boolean(autoSortCheckbox?.checked);
 
         if (selectionCount) {
             if (selectedCount === 0) {
@@ -256,6 +302,13 @@
         if (compileButton) {
             const compileLocked = compileButton.dataset.locked === "true";
             compileButton.disabled = compileLocked || selectedCount === 0;
+        }
+
+        if (autoDeleteCheckbox) {
+            autoDeleteCheckbox.disabled = !autoSortEnabled;
+            if (!autoSortEnabled && autoDeleteCheckbox.checked) {
+                autoDeleteCheckbox.checked = false;
+            }
         }
 
         if (savedMoveTargetPreview && savedMoveTargetSelect) {
@@ -311,6 +364,20 @@
         compileDestinationSelect.addEventListener("change", updateSelectionUi);
     }
 
+    if (autoSortCheckbox) {
+        autoSortCheckbox.addEventListener("change", () => {
+            updateSelectionUi();
+            writeArchiveAutomationState();
+        });
+    }
+
+    if (autoDeleteCheckbox) {
+        autoDeleteCheckbox.addEventListener("change", () => {
+            updateSelectionUi();
+            writeArchiveAutomationState();
+        });
+    }
+
     if (savedMoveTargetSelect && moveTargetInput) {
         savedMoveTargetSelect.addEventListener("change", () => {
             const selectedValue = savedMoveTargetSelect.value;
@@ -325,6 +392,14 @@
         compileButton.dataset.locked = "true";
     }
 
+    const initialArchiveAutomationState = readArchiveAutomationState();
+    if (initialArchiveAutomationState && autoSortCheckbox) {
+        autoSortCheckbox.checked = initialArchiveAutomationState.autoSortEnabled;
+        if (autoDeleteCheckbox) {
+            autoDeleteCheckbox.checked = initialArchiveAutomationState.autoDeleteEnabled;
+        }
+    }
+
     if (archiveJobList && initialArchivePayload) {
         try {
             const initialJobs = JSON.parse(initialArchivePayload.textContent || "[]");
@@ -337,4 +412,5 @@
     }
 
     updateSelectionUi();
+    writeArchiveAutomationState();
 })();

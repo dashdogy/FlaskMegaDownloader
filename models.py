@@ -36,11 +36,12 @@ ARCHIVE_JOB_STATUSES = {
     "probing",
     "extracting",
     "sorting",
+    "cleaning",
     "completed",
     "failed",
     "canceled",
 }
-ACTIVE_ARCHIVE_JOB_STATUSES = {"probing", "extracting", "sorting"}
+ACTIVE_ARCHIVE_JOB_STATUSES = {"probing", "extracting", "sorting", "cleaning"}
 RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed", "canceled"}
 
 
@@ -176,9 +177,11 @@ class ArchiveJob:
     target_path: str
     archive_password: str | None = None
     auto_sort_enabled: bool = False
+    auto_delete_enabled: bool = False
     movies_target_path: str | None = None
     tv_target_path: str | None = None
     sort_summary: dict = field(default_factory=dict)
+    auto_delete_summary: dict = field(default_factory=dict)
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -217,9 +220,11 @@ class ArchiveJob:
             target_path=data["target_path"],
             archive_password=data.get("archive_password"),
             auto_sort_enabled=bool(data.get("auto_sort_enabled", False)),
+            auto_delete_enabled=bool(data.get("auto_delete_enabled", False)),
             movies_target_path=data.get("movies_target_path"),
             tv_target_path=data.get("tv_target_path"),
             sort_summary=dict(data.get("sort_summary") or {}),
+            auto_delete_summary=dict(data.get("auto_delete_summary") or {}),
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),
             updated_at=data.get("updated_at", utcnow_iso()),

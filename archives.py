@@ -37,6 +37,22 @@ class ArchiveProbe:
     entry_count: int
 
 
+@dataclass(slots=True)
+class ArchiveDeleteSummary:
+    deleted_paths: list[str]
+    failed_paths: list[str]
+    kept_reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "deleted_paths": list(self.deleted_paths),
+            "failed_paths": list(self.failed_paths),
+            "deleted_count": len(self.deleted_paths),
+            "failed_count": len(self.failed_paths),
+            "kept_reason": self.kept_reason,
+        }
+
+
 SUPPORTED_ARCHIVE_SUFFIXES = {".zip", ".rar", ".7z"}
 SEVEN_ZIP_SPLIT_FIRST_RE = re.compile(r"^(?P<base>.+)\.7z\.001$", re.IGNORECASE)
 RAR_PART_RE = re.compile(r"^(?P<base>.+)\.part(?P<index>\d+)\.rar$", re.IGNORECASE)
@@ -86,6 +102,82 @@ def default_archive_target_name(path: Path) -> str:
     if archive_type is None:
         raise ArchiveError("Only zip, rar, and 7z archives are supported.")
     return path.with_suffix("").name
+
+
+def discover_related_archive_files(archive_path: Path) -> list[Path]:
+    archive_path = archive_path.resolve()
+    if not archive_path.exists():
+        return []
+
+    name = archive_path.name
+    parent = archive_path.parent
+    related: list[Path] = []
+    seen: set[str] = set()
+
+    def add_path(candidate: Path) -> None:
+        key = os.path.normcase(str(candidate))
+        if key in seen or candidate.parent != parent or not candidate.exists():
+            return
+        related.append(candidate)
+        seen.add(key)
+
+    split_match = SEVEN_ZIP_SPLIT_FIRST_RE.match(name)
+    if split_match:
+        base = split_match.group("base")
+        for candidate in sorted(parent.iterdir(), key=lambda item: item.name.lower()):
+            candidate_match = re.match(
+                rf"^{re.escape(base)}\.7z\.(\d+)$",
+                candidate.name,
+                re.IGNORECASE,
+            )
+            if candidate_match:
+                add_path(candidate)
+        return related
+
+    rar_part_match = RAR_PART_RE.match(name)
+    if rar_part_match:
+        base = rar_part_match.group("base")
+        for candidate in sorted(parent.iterdir(), key=lambda item: item.name.lower()):
+            if re.match(rf"^{re.escape(base)}\.part\d+\.rar$", candidate.name, re.IGNORECASE):
+                add_path(candidate)
+                continue
+            if re.match(rf"^{re.escape(base)}\.r\d{{2,}}$", candidate.name, re.IGNORECASE):
+                add_path(candidate)
+        return related
+
+    add_path(archive_path)
+    return related
+
+
+def delete_archive_source_files(
+    archive_path: Path,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> ArchiveDeleteSummary:
+    deleted_paths: list[str] = []
+    failed_paths: list[str] = []
+    for candidate in discover_related_archive_files(archive_path):
+        _raise_if_canceled(cancel_requested)
+        try:
+            candidate.unlink()
+        except OSError:
+            failed_paths.append(str(candidate))
+        else:
+            deleted_paths.append(str(candidate))
+    return ArchiveDeleteSummary(deleted_paths=deleted_paths, failed_paths=failed_paths)
+
+
+def build_auto_delete_summary_message(summary: ArchiveDeleteSummary) -> str:
+    if summary.kept_reason == "no_videos_moved":
+        return "Kept source archives because no video files were moved."
+    parts: list[str] = []
+    if summary.deleted_paths:
+        parts.append(f"deleted {len(summary.deleted_paths)} archive file(s)")
+    if summary.failed_paths:
+        parts.append(f"{len(summary.failed_paths)} failed")
+    if not parts:
+        return "Kept source archives."
+    return f"Auto-delete {', '.join(parts)}."
 
 
 def _safe_target_path(destination_dir: Path, member_name: str) -> Path:

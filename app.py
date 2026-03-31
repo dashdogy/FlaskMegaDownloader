@@ -373,6 +373,7 @@ def create_app() -> Flask:
         target_dir_name: str | None = None,
         skip_non_archive: bool,
         auto_sort_enabled: bool = False,
+        auto_delete_enabled: bool = False,
     ) -> dict:
         root_info, _, resolved_entries = resolve_entries_in_directory(
             manager.destinations,
@@ -389,6 +390,7 @@ def create_app() -> Flask:
 
         if auto_sort_enabled:
             movies_target_path, tv_target_path = resolve_archive_auto_sort_targets()
+        auto_delete_enabled = auto_sort_enabled and auto_delete_enabled
 
         if target_dir_name:
             target_dir_name = validate_entry_name(target_dir_name)
@@ -418,6 +420,7 @@ def create_app() -> Flask:
                     "target_path": str(target_dir),
                     "archive_password": password,
                     "auto_sort_enabled": auto_sort_enabled,
+                    "auto_delete_enabled": auto_delete_enabled,
                     "movies_target_path": str(movies_target_path) if movies_target_path else None,
                     "tv_target_path": str(tv_target_path) if tv_target_path else None,
                 }
@@ -869,6 +872,7 @@ def create_app() -> Flask:
         selected_paths = request.form.getlist("selected_paths")
         password = request.form.get("password") or None
         auto_sort_enabled = request.form.get("auto_sort_extracted_videos") == "1"
+        auto_delete_enabled = auto_sort_enabled and request.form.get("auto_delete_source_archives") == "1"
 
         try:
             result = extract_archives_in_folder(
@@ -878,6 +882,7 @@ def create_app() -> Flask:
                 password=password,
                 skip_non_archive=True,
                 auto_sort_enabled=auto_sort_enabled,
+                auto_delete_enabled=auto_delete_enabled,
             )
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
@@ -905,6 +910,8 @@ def create_app() -> Flask:
             flash("No archive extraction jobs were queued.", "error")
         elif auto_sort_enabled and result["queued"]:
             flash("Auto-sort will move extracted videos into the saved Movies or TvShows favorites after extraction finishes.", "success")
+            if auto_delete_enabled:
+                flash("Auto-delete will remove the source archive files after a successful auto-sort move.", "success")
         log_event(
             "info",
             "archive",
@@ -917,6 +924,7 @@ def create_app() -> Flask:
                 "skipped": len(result["skipped"]),
                 "failures": len(result["failures"]),
                 "auto_sort_enabled": auto_sort_enabled,
+                "auto_delete_enabled": auto_delete_enabled,
             },
         )
         return explorer_redirect(root_key, current_path, sort_by)
