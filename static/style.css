@@ -236,6 +236,29 @@ button:disabled {
     min-width: 0;
 }
 
+.archive-automation-settings {
+    display: grid;
+    gap: 10px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    border: 1px solid rgba(67, 115, 157, 0.1);
+    background: rgba(244, 249, 253, 0.82);
+}
+
+.archive-automation-settings .checkbox-label {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 0;
+    color: var(--text);
+}
+
+.archive-automation-settings input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+}
+
 .destination-fields select,
 .destination-fields input[type="text"] {
     min-height: 54px;
@@ -516,6 +539,26 @@ button:disabled {
     margin: 12px 0 10px;
     color: var(--muted);
     font-size: 0.92rem;
+}
+
+.auto-extract-panel {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border-radius: 18px;
+    background: rgba(240, 246, 251, 0.95);
+    border: 1px solid rgba(67, 115, 157, 0.08);
+}
+
+.auto-extract-panel .metric-row {
+    margin: 0 0 10px;
+}
+
+.auto-extract-panel .metric-row:last-child {
+    margin-bottom: 0;
+}
+
+.auto-extract-row {
+    font-size: 0.88rem;
 }
 
 .job-url {

@@ -115,18 +115,31 @@
                     <div class="explorer-tool-actions">
                         <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
                         <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
+                        <button type="submit" formaction="{{ url_for('save_archive_automation_settings') }}" class="secondary-button">Save Archive Defaults</button>
                     </div>
                     <div class="explorer-field-grid">
                         <div class="explorer-field explorer-field-wide">
                             <label for="auto-sort-extracted-videos" class="checkbox-label">
-                                <input type="checkbox" id="auto-sort-extracted-videos" name="auto_sort_extracted_videos" value="1">
+                                <input
+                                    type="checkbox"
+                                    id="auto-sort-extracted-videos"
+                                    name="archive_auto_sort_enabled"
+                                    value="1"
+                                    {% if archive_automation_settings.auto_sort_enabled %}checked{% endif %}
+                                >
                                 Auto-sort extracted videos after extraction
                             </label>
                             <p class="explorer-field-help">Requires exactly one saved move favorite named <strong>Movies</strong> and one named <strong>TvShows</strong>. Video files only are moved automatically.</p>
                         </div>
                         <div class="explorer-field explorer-field-wide">
                             <label for="auto-delete-source-archives" class="checkbox-label">
-                                <input type="checkbox" id="auto-delete-source-archives" name="auto_delete_source_archives" value="1">
+                                <input
+                                    type="checkbox"
+                                    id="auto-delete-source-archives"
+                                    name="archive_auto_delete_enabled"
+                                    value="1"
+                                    {% if archive_automation_settings.auto_delete_enabled %}checked{% endif %}
+                                >
                                 Auto delete source archives after successful auto-sort move
                             </label>
                             <p class="explorer-field-help">Only deletes the original archive files after at least one video was moved to Movies or TvShows. The extracted output folder is never removed.</p>

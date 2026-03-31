@@ -170,6 +170,7 @@ def create_app() -> Flask:
         seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
         event_logger=event_logger,
     )
+    manager.attach_archive_manager(archive_manager)
     app.extensions["download_manager"] = manager
     app.extensions["media_compile_manager"] = media_manager
     app.extensions["archive_extract_manager"] = archive_manager
@@ -284,6 +285,20 @@ def create_app() -> Flask:
             return target_path
 
         return favorite_for_label("Movies"), favorite_for_label("TvShows")
+
+    def persist_archive_automation_settings_from_form(
+        *,
+        auto_sort_field: str = "archive_auto_sort_enabled",
+        auto_delete_field: str = "archive_auto_delete_enabled",
+    ) -> dict:
+        auto_sort_enabled = request.form.get(auto_sort_field) == "1"
+        auto_delete_enabled = auto_sort_enabled and request.form.get(auto_delete_field) == "1"
+        if auto_sort_enabled:
+            resolve_archive_auto_sort_targets()
+        return manager.update_archive_automation_settings(
+            auto_sort_enabled=auto_sort_enabled,
+            auto_delete_enabled=auto_delete_enabled,
+        )
 
     def save_move_favorite(root_key: str, current_path: str, target_input: str) -> dict:
         _, _, target_dir = resolve_move_target(manager.destinations, root_key, current_path, target_input)
@@ -450,6 +465,7 @@ def create_app() -> Flask:
             "can_restore_base_destinations": manager.can_restore_base_destinations(),
             "queue_sort_options": manager.queue_sort_options(),
             "current_queue_sort": manager.queue_sort_mode,
+            "archive_automation_settings": manager.archive_automation_settings_payload(),
         }
 
     @app.get("/")
@@ -462,9 +478,25 @@ def create_app() -> Flask:
 
     @app.post("/submit")
     def submit():
+        submit_mode = request.form.get("submit_mode", "start").strip().lower()
+        auto_extract_enabled = submit_mode == "auto_extract"
         urls = parse_urls(request.form.get("urls", ""))
         destination_key = request.form.get("destination", "")
         destination_subpath = normalize_destination_path_input(request.form.get("destination_path", ""))
+
+        try:
+            archive_automation_settings = persist_archive_automation_settings_from_form()
+        except ValueError as exc:
+            flash(str(exc), "error")
+            log_event(
+                "error",
+                "archive",
+                "settings",
+                "Archive automation settings update failed during submission.",
+                context={"error": str(exc)},
+            )
+            return redirect(url_for("dashboard"))
+
         if not urls:
             flash("Paste at least one MEGA or Filecrypt URL.", "error")
             log_event("warning", "download", "submit", "Submission rejected because no URLs were provided.")
@@ -480,6 +512,8 @@ def create_app() -> Flask:
                 "source_summary": submission_source_summary(urls),
                 "destination_key": destination_key,
                 "destination_path": destination_subpath,
+                "auto_extract_enabled": auto_extract_enabled,
+                "archive_automation_settings": archive_automation_settings,
             },
         )
 
@@ -514,6 +548,7 @@ def create_app() -> Flask:
                 destination_key,
                 destination_subpath,
                 metadata_overrides=metadata_overrides,
+                auto_extract_enabled=auto_extract_enabled,
             )
         except ValueError as exc:
             flash(str(exc), "error")
@@ -536,6 +571,8 @@ def create_app() -> Flask:
                 ),
                 "success",
             )
+        if auto_extract_enabled:
+            flash("Auto Extract is enabled for this batch. Archive extraction will start as soon as each archive set is complete.", "success")
         flash(f"Queued {len(jobs)} job(s) in batch {jobs[0].batch_id}.", "success")
         log_event(
             "info",
@@ -543,9 +580,39 @@ def create_app() -> Flask:
             "submit",
             "Queued download batch.",
             batch_id=jobs[0].batch_id,
-            context={"job_count": len(jobs), "destination_key": destination_key},
+            context={
+                "job_count": len(jobs),
+                "destination_key": destination_key,
+                "auto_extract_enabled": auto_extract_enabled,
+                "archive_automation_settings": archive_automation_settings,
+            },
         )
         return redirect(url_for("dashboard"))
+
+    @app.post("/archive-automation-settings")
+    def save_archive_automation_settings():
+        try:
+            settings = persist_archive_automation_settings_from_form()
+        except ValueError as exc:
+            flash(str(exc), "error")
+            log_event(
+                "error",
+                "archive",
+                "settings",
+                "Archive automation settings update failed.",
+                context={"error": str(exc)},
+            )
+            return post_context_redirect("dashboard")
+
+        flash("Saved archive automation defaults.", "success")
+        log_event(
+            "info",
+            "archive",
+            "settings",
+            "Saved archive automation defaults.",
+            context=settings,
+        )
+        return post_context_redirect("dashboard")
 
     @app.post("/favorites")
     def add_favorite():
@@ -871,8 +938,12 @@ def create_app() -> Flask:
         sort_by = request.form.get("sort", "name")
         selected_paths = request.form.getlist("selected_paths")
         password = request.form.get("password") or None
-        auto_sort_enabled = request.form.get("auto_sort_extracted_videos") == "1"
-        auto_delete_enabled = auto_sort_enabled and request.form.get("auto_delete_source_archives") == "1"
+        try:
+            archive_automation_settings = persist_archive_automation_settings_from_form()
+        except ValueError as exc:
+            flash(str(exc), "error")
+            log_event("error", "archive", "settings", "Archive automation settings update failed from explorer.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return explorer_redirect(root_key, current_path, sort_by)
 
         try:
             result = extract_archives_in_folder(
@@ -881,8 +952,8 @@ def create_app() -> Flask:
                 selected_paths,
                 password=password,
                 skip_non_archive=True,
-                auto_sort_enabled=auto_sort_enabled,
-                auto_delete_enabled=auto_delete_enabled,
+                auto_sort_enabled=archive_automation_settings["auto_sort_enabled"],
+                auto_delete_enabled=archive_automation_settings["auto_delete_enabled"],
             )
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
@@ -908,9 +979,9 @@ def create_app() -> Flask:
             )
         if not result["queued"] and not result["skipped"] and not result["failures"]:
             flash("No archive extraction jobs were queued.", "error")
-        elif auto_sort_enabled and result["queued"]:
+        elif archive_automation_settings["auto_sort_enabled"] and result["queued"]:
             flash("Auto-sort will move extracted videos into the saved Movies or TvShows favorites after extraction finishes.", "success")
-            if auto_delete_enabled:
+            if archive_automation_settings["auto_delete_enabled"]:
                 flash("Auto-delete will remove the source archive files after a successful auto-sort move.", "success")
         log_event(
             "info",
@@ -923,8 +994,8 @@ def create_app() -> Flask:
                 "queued": len(result["queued"]),
                 "skipped": len(result["skipped"]),
                 "failures": len(result["failures"]),
-                "auto_sort_enabled": auto_sort_enabled,
-                "auto_delete_enabled": auto_delete_enabled,
+                "auto_sort_enabled": archive_automation_settings["auto_sort_enabled"],
+                "auto_delete_enabled": archive_automation_settings["auto_delete_enabled"],
             },
         )
         return explorer_redirect(root_key, current_path, sort_by)

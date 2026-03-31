@@ -8,11 +8,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from models import ArchiveJob, EventLogEntry, FavoriteDestination, Job, MediaJob, MoveFavorite
+from models import (
+    ArchiveAutomationSettings,
+    ArchiveJob,
+    AutoExtractSet,
+    EventLogEntry,
+    FavoriteDestination,
+    Job,
+    MediaJob,
+    MoveFavorite,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 
 def _utc_compact_timestamp() -> str:
@@ -54,6 +63,11 @@ class SQLiteStorage:
                     display_name TEXT NOT NULL,
                     destination_relative_path TEXT NOT NULL,
                     destination_is_custom INTEGER NOT NULL,
+                    auto_extract_enabled INTEGER NOT NULL DEFAULT 0,
+                    archive_auto_sort_enabled INTEGER NOT NULL DEFAULT 0,
+                    archive_auto_delete_enabled INTEGER NOT NULL DEFAULT 0,
+                    archive_movies_target_path TEXT,
+                    archive_tv_target_path TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -132,6 +146,34 @@ class SQLiteStorage:
                     path TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS auto_extract_sets (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    destination_key TEXT NOT NULL,
+                    destination_path TEXT NOT NULL,
+                    destination_relative_path TEXT NOT NULL,
+                    destination_is_custom INTEGER NOT NULL,
+                    set_key TEXT NOT NULL,
+                    archive_type TEXT NOT NULL,
+                    multipart_style TEXT NOT NULL,
+                    archive_relative_path TEXT NOT NULL,
+                    entrypoint_filename TEXT NOT NULL,
+                    expected_part_filenames_json TEXT NOT NULL,
+                    job_ids_json TEXT NOT NULL,
+                    archive_job_id TEXT,
+                    auto_sort_enabled INTEGER NOT NULL DEFAULT 0,
+                    auto_delete_enabled INTEGER NOT NULL DEFAULT 0,
+                    movies_target_path TEXT,
+                    tv_target_path TEXT,
+                    target_relative_path TEXT NOT NULL,
+                    target_path TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    error TEXT,
+                    last_message TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS event_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -145,6 +187,11 @@ class SQLiteStorage:
                 );
                 """
             )
+            self._ensure_column(connection, "download_jobs", "auto_extract_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "download_jobs", "archive_auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "download_jobs", "archive_auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "download_jobs", "archive_movies_target_path", "TEXT")
+            self._ensure_column(connection, "download_jobs", "archive_tv_target_path", "TEXT")
             self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
             self._ensure_column(connection, "archive_jobs", "auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "archive_jobs", "auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
@@ -152,6 +199,8 @@ class SQLiteStorage:
             self._ensure_column(connection, "archive_jobs", "tv_target_path", "TEXT")
             self._ensure_column(connection, "archive_jobs", "sort_summary_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(connection, "archive_jobs", "auto_delete_summary_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(connection, "auto_extract_sets", "movies_target_path", "TEXT")
+            self._ensure_column(connection, "auto_extract_sets", "tv_target_path", "TEXT")
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (SCHEMA_VERSION,),
@@ -200,6 +249,10 @@ class SQLiteStorage:
         move_favorites = [MoveFavorite.from_dict(item) for item in raw_payload.get("move_favorites", [])]
         media_jobs = [MediaJob.from_dict(item) for item in raw_payload.get("media_jobs", [])]
         archive_jobs = [ArchiveJob.from_dict(item) for item in raw_payload.get("archive_jobs", [])]
+        auto_extract_sets = [AutoExtractSet.from_dict(item) for item in raw_payload.get("auto_extract_sets", [])]
+        archive_automation_settings = ArchiveAutomationSettings.from_dict(
+            raw_payload.get("archive_automation_settings")
+        )
 
         with self._lock:
             self.save_state(
@@ -209,6 +262,8 @@ class SQLiteStorage:
                 move_favorites=move_favorites,
                 media_jobs=media_jobs,
                 archive_jobs=archive_jobs,
+                auto_extract_sets=auto_extract_sets,
+                archive_automation_settings=archive_automation_settings,
             )
             with self._connect() as connection:
                 connection.execute(
@@ -304,6 +359,46 @@ class SQLiteStorage:
             for row in rows
         ]
 
+    def load_archive_automation_settings(self) -> ArchiveAutomationSettings:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                ("archive_automation_settings_json",),
+            ).fetchone()
+        if not row:
+            return ArchiveAutomationSettings()
+        try:
+            payload = json.loads(row["value"] or "{}")
+        except json.JSONDecodeError:
+            return ArchiveAutomationSettings()
+        return ArchiveAutomationSettings.from_dict(payload)
+
+    def save_archive_automation_settings(self, settings: ArchiveAutomationSettings) -> None:
+        normalized = settings.normalized()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                ("archive_automation_settings_json", json.dumps(normalized.to_dict())),
+            )
+            connection.commit()
+
+    def load_auto_extract_sets(self) -> list[AutoExtractSet]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM auto_extract_sets
+                ORDER BY created_at ASC, id ASC
+                """
+            ).fetchall()
+        return [self._auto_extract_set_from_row(row) for row in rows]
+
+    def save_auto_extract_sets(self, auto_extract_sets: Iterable[AutoExtractSet]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            self._replace_auto_extract_sets(connection, auto_extract_sets)
+            connection.commit()
+
     def load_media_jobs(self) -> list[MediaJob]:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -392,6 +487,8 @@ class SQLiteStorage:
         move_favorites: Iterable[MoveFavorite] | None = None,
         media_jobs: Iterable[MediaJob] | None = None,
         archive_jobs: Iterable[ArchiveJob] | None = None,
+        auto_extract_sets: Iterable[AutoExtractSet] | None = None,
+        archive_automation_settings: ArchiveAutomationSettings | None = None,
     ) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN")
@@ -404,6 +501,16 @@ class SQLiteStorage:
                 self._replace_media_jobs(connection, media_jobs)
             if archive_jobs is not None:
                 self._replace_archive_jobs(connection, archive_jobs)
+            if auto_extract_sets is not None:
+                self._replace_auto_extract_sets(connection, auto_extract_sets)
+            if archive_automation_settings is not None:
+                connection.execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                    (
+                        "archive_automation_settings_json",
+                        json.dumps(archive_automation_settings.normalized().to_dict()),
+                    ),
+                )
             connection.commit()
 
     def save_move_favorites(self, move_favorites: Iterable[MoveFavorite]) -> None:
@@ -442,6 +549,11 @@ class SQLiteStorage:
                 job.display_name,
                 job.destination_relative_path,
                 int(job.destination_is_custom),
+                int(job.auto_extract_enabled),
+                int(job.archive_auto_sort_enabled),
+                int(job.archive_auto_delete_enabled),
+                job.archive_movies_target_path,
+                job.archive_tv_target_path,
                 job.status,
                 job.created_at,
                 job.updated_at,
@@ -455,9 +567,10 @@ class SQLiteStorage:
             """
             INSERT INTO download_jobs(
                 id, batch_id, url, destination_key, destination_path, display_name,
-                destination_relative_path, destination_is_custom, status, created_at,
-                updated_at, error, transfer_json, output_tail_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                destination_relative_path, destination_is_custom, auto_extract_enabled,
+                archive_auto_sort_enabled, archive_auto_delete_enabled, archive_movies_target_path,
+                archive_tv_target_path, status, created_at, updated_at, error, transfer_json, output_tail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -579,6 +692,55 @@ class SQLiteStorage:
             rows,
         )
 
+    def _replace_auto_extract_sets(
+        self,
+        connection: sqlite3.Connection,
+        auto_extract_sets: Iterable[AutoExtractSet],
+    ) -> None:
+        connection.execute("DELETE FROM auto_extract_sets")
+        rows = [
+            (
+                item.id,
+                item.batch_id,
+                item.destination_key,
+                item.destination_path,
+                item.destination_relative_path,
+                int(item.destination_is_custom),
+                item.set_key,
+                item.archive_type,
+                item.multipart_style,
+                item.archive_relative_path,
+                item.entrypoint_filename,
+                json.dumps(item.expected_part_filenames),
+                json.dumps(item.job_ids),
+                item.archive_job_id,
+                int(item.auto_sort_enabled),
+                int(item.auto_delete_enabled),
+                item.movies_target_path,
+                item.tv_target_path,
+                item.target_relative_path,
+                item.target_path,
+                item.status,
+                item.created_at,
+                item.updated_at,
+                item.error,
+                item.last_message,
+            )
+            for item in auto_extract_sets
+        ]
+        connection.executemany(
+            """
+            INSERT INTO auto_extract_sets(
+                id, batch_id, destination_key, destination_path, destination_relative_path,
+                destination_is_custom, set_key, archive_type, multipart_style, archive_relative_path,
+                entrypoint_filename, expected_part_filenames_json, job_ids_json, archive_job_id,
+                auto_sort_enabled, auto_delete_enabled, movies_target_path, tv_target_path,
+                target_relative_path, target_path, status, created_at, updated_at, error, last_message
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
     def _job_from_row(self, row: sqlite3.Row) -> Job:
         return Job(
             id=row["id"],
@@ -589,6 +751,11 @@ class SQLiteStorage:
             destination_relative_path=row["destination_relative_path"],
             display_name=row["display_name"],
             destination_is_custom=bool(row["destination_is_custom"]),
+            auto_extract_enabled=bool(row["auto_extract_enabled"]),
+            archive_auto_sort_enabled=bool(row["archive_auto_sort_enabled"]),
+            archive_auto_delete_enabled=bool(row["archive_auto_delete_enabled"]),
+            archive_movies_target_path=row["archive_movies_target_path"],
+            archive_tv_target_path=row["archive_tv_target_path"],
             status=row["status"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -665,6 +832,35 @@ class SQLiteStorage:
             job_id=row["job_id"],
             batch_id=row["batch_id"],
             context=json.loads(row["context_json"] or "{}"),
+        )
+
+    def _auto_extract_set_from_row(self, row: sqlite3.Row) -> AutoExtractSet:
+        return AutoExtractSet(
+            id=row["id"],
+            batch_id=row["batch_id"],
+            destination_key=row["destination_key"],
+            destination_path=row["destination_path"],
+            destination_relative_path=row["destination_relative_path"],
+            destination_is_custom=bool(row["destination_is_custom"]),
+            set_key=row["set_key"],
+            archive_type=row["archive_type"],
+            multipart_style=row["multipart_style"],
+            archive_relative_path=row["archive_relative_path"],
+            entrypoint_filename=row["entrypoint_filename"],
+            expected_part_filenames=list(json.loads(row["expected_part_filenames_json"] or "[]")),
+            job_ids=list(json.loads(row["job_ids_json"] or "[]")),
+            archive_job_id=row["archive_job_id"],
+            auto_sort_enabled=bool(row["auto_sort_enabled"]),
+            auto_delete_enabled=bool(row["auto_delete_enabled"]),
+            movies_target_path=row["movies_target_path"],
+            tv_target_path=row["tv_target_path"],
+            target_relative_path=row["target_relative_path"],
+            target_path=row["target_path"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            error=row["error"],
+            last_message=row["last_message"] or "",
         )
 
 

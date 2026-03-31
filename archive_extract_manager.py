@@ -246,6 +246,13 @@ class ArchiveExtractManager:
             "updated_at": utcnow_iso(),
         }
 
+    def job_payload(self, job_id: str) -> dict | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            return self._job_payload(job)
+
     def _summary_throughput_bps_locked(self, active_jobs: list[ArchiveJob]) -> float | None:
         if not active_jobs:
             self._summary_throughput_sample = None

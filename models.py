@@ -44,6 +44,17 @@ ARCHIVE_JOB_STATUSES = {
 ACTIVE_ARCHIVE_JOB_STATUSES = {"probing", "extracting", "sorting", "cleaning"}
 RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed", "canceled"}
 
+AUTO_EXTRACT_SET_STATUSES = {
+    "waiting",
+    "ready",
+    "queued_for_extract",
+    "extracting",
+    "completed",
+    "failed",
+    "canceled",
+}
+ACTIVE_AUTO_EXTRACT_SET_STATUSES = {"ready", "queued_for_extract", "extracting"}
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -106,6 +117,11 @@ class Job:
     display_name: str
     destination_relative_path: str = ""
     destination_is_custom: bool = False
+    auto_extract_enabled: bool = False
+    archive_auto_sort_enabled: bool = False
+    archive_auto_delete_enabled: bool = False
+    archive_movies_target_path: str | None = None
+    archive_tv_target_path: str | None = None
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -140,6 +156,11 @@ class Job:
             destination_relative_path=data.get("destination_relative_path", ""),
             display_name=data.get("display_name") or data["url"],
             destination_is_custom=bool(data.get("destination_is_custom", False)),
+            auto_extract_enabled=bool(data.get("auto_extract_enabled", False)),
+            archive_auto_sort_enabled=bool(data.get("archive_auto_sort_enabled", False)),
+            archive_auto_delete_enabled=bool(data.get("archive_auto_delete_enabled", False)),
+            archive_movies_target_path=data.get("archive_movies_target_path"),
+            archive_tv_target_path=data.get("archive_tv_target_path"),
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),
             updated_at=data.get("updated_at", utcnow_iso()),
@@ -269,6 +290,98 @@ class MoveFavorite:
             key=data["key"],
             label=data["label"],
             path=data["path"],
+        )
+
+
+@dataclass(slots=True)
+class ArchiveAutomationSettings:
+    auto_sort_enabled: bool = False
+    auto_delete_enabled: bool = False
+
+    def normalized(self) -> "ArchiveAutomationSettings":
+        return ArchiveAutomationSettings(
+            auto_sort_enabled=bool(self.auto_sort_enabled),
+            auto_delete_enabled=bool(self.auto_sort_enabled and self.auto_delete_enabled),
+        )
+
+    def to_dict(self) -> dict:
+        normalized = self.normalized()
+        return {
+            "auto_sort_enabled": normalized.auto_sort_enabled,
+            "auto_delete_enabled": normalized.auto_delete_enabled,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "ArchiveAutomationSettings":
+        payload = data or {}
+        return cls(
+            auto_sort_enabled=bool(payload.get("auto_sort_enabled", False)),
+            auto_delete_enabled=bool(payload.get("auto_delete_enabled", False)),
+        ).normalized()
+
+
+@dataclass(slots=True)
+class AutoExtractSet:
+    id: str
+    batch_id: str
+    destination_key: str
+    destination_path: str
+    destination_relative_path: str = ""
+    destination_is_custom: bool = False
+    set_key: str = ""
+    archive_type: str = ""
+    multipart_style: str = ""
+    archive_relative_path: str = ""
+    entrypoint_filename: str = ""
+    expected_part_filenames: list[str] = field(default_factory=list)
+    job_ids: list[str] = field(default_factory=list)
+    archive_job_id: str | None = None
+    auto_sort_enabled: bool = False
+    auto_delete_enabled: bool = False
+    movies_target_path: str | None = None
+    tv_target_path: str | None = None
+    target_relative_path: str = ""
+    target_path: str | None = None
+    status: str = "waiting"
+    created_at: str = field(default_factory=utcnow_iso)
+    updated_at: str = field(default_factory=utcnow_iso)
+    error: str | None = None
+    last_message: str = ""
+
+    def touch(self) -> None:
+        self.updated_at = utcnow_iso()
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AutoExtractSet":
+        return cls(
+            id=data["id"],
+            batch_id=data["batch_id"],
+            destination_key=data["destination_key"],
+            destination_path=data["destination_path"],
+            destination_relative_path=data.get("destination_relative_path", ""),
+            destination_is_custom=bool(data.get("destination_is_custom", False)),
+            set_key=data.get("set_key", ""),
+            archive_type=data.get("archive_type", ""),
+            multipart_style=data.get("multipart_style", ""),
+            archive_relative_path=data.get("archive_relative_path", ""),
+            entrypoint_filename=data.get("entrypoint_filename", ""),
+            expected_part_filenames=list(data.get("expected_part_filenames", [])),
+            job_ids=list(data.get("job_ids", [])),
+            archive_job_id=data.get("archive_job_id"),
+            auto_sort_enabled=bool(data.get("auto_sort_enabled", False)),
+            auto_delete_enabled=bool(data.get("auto_delete_enabled", False)),
+            movies_target_path=data.get("movies_target_path"),
+            tv_target_path=data.get("tv_target_path"),
+            target_relative_path=data.get("target_relative_path", ""),
+            target_path=data.get("target_path"),
+            status=data.get("status", "waiting"),
+            created_at=data.get("created_at", utcnow_iso()),
+            updated_at=data.get("updated_at", utcnow_iso()),
+            error=data.get("error"),
+            last_message=data.get("last_message", ""),
         )
 
 

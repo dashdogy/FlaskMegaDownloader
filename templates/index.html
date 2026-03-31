@@ -35,11 +35,40 @@ https://filecrypt.cc/Container/..."></textarea>
                         autocomplete="off"
                     >
                     <p class="subtle form-hint">Use a relative path for a subfolder inside the selected root, or an absolute path for another mounted disk. Filecrypt support is limited to public container pages. Add a custom path to favorites only after it is writable by the app user.</p>
+                    <div class="archive-automation-settings">
+                        <label class="checkbox-label" for="dashboard-archive-auto-sort">
+                            <input
+                                id="dashboard-archive-auto-sort"
+                                type="checkbox"
+                                name="archive_auto_sort_enabled"
+                                value="1"
+                                {% if archive_automation_settings.auto_sort_enabled %}checked{% endif %}
+                            >
+                            Auto-sort after extract
+                        </label>
+                        <label class="checkbox-label" for="dashboard-archive-auto-delete">
+                            <input
+                                id="dashboard-archive-auto-delete"
+                                type="checkbox"
+                                name="archive_auto_delete_enabled"
+                                value="1"
+                                {% if archive_automation_settings.auto_delete_enabled %}checked{% endif %}
+                            >
+                            Auto-delete after move
+                        </label>
+                        <p class="subtle form-hint">These are shared archive automation defaults used by both explorer extraction and download-side Auto Extract.</p>
+                    </div>
                 </div>
                 <div class="button-row">
-                    <button type="submit" {% if not has_destinations %}disabled{% endif %}>Start Queue</button>
+                    <button type="submit" name="submit_mode" value="start" {% if not has_destinations %}disabled{% endif %}>Start Queue</button>
+                    <button type="submit" name="submit_mode" value="auto_extract" class="secondary-button" {% if not has_destinations %}disabled{% endif %}>
+                        Auto Extract
+                    </button>
                     <button type="submit" formaction="{{ url_for('add_favorite') }}" formmethod="post" class="secondary-button" {% if not has_destinations %}disabled{% endif %}>
                         Add To Favorites
+                    </button>
+                    <button type="submit" formaction="{{ url_for('save_archive_automation_settings') }}" formmethod="post" class="secondary-button">
+                        Save Archive Defaults
                     </button>
                 </div>
             </div>

@@ -746,8 +746,8 @@ class ArchiveRequestPathTests(unittest.TestCase):
                         "current_path": "",
                         "sort": "name",
                         "selected_paths": "sample.zip",
-                        "auto_sort_extracted_videos": "1",
-                        "auto_delete_source_archives": "1",
+                        "archive_auto_sort_enabled": "1",
+                        "archive_auto_delete_enabled": "1",
                     },
                 )
 
@@ -811,7 +811,7 @@ class ArchiveRequestPathTests(unittest.TestCase):
                         "current_path": "",
                         "sort": "name",
                         "selected_paths": "sample.zip",
-                        "auto_sort_extracted_videos": "1",
+                        "archive_auto_sort_enabled": "1",
                     },
                 )
 

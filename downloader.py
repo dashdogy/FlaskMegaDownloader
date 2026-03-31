@@ -22,8 +22,20 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pyzipper
 
+from archive_auto_sort import guessit_available
+from archives import default_archive_target_name
 from explorer import normalize_destinations, normalize_user_path_input, path_within_root, relative_to_root, resolve_absolute_input_path
-from models import ACTIVE_JOB_STATUSES, FavoriteDestination, JOB_STATUSES, RETRYABLE_JOB_STATUSES, Job, TransferStatus, utcnow_iso
+from models import (
+    ACTIVE_JOB_STATUSES,
+    ArchiveAutomationSettings,
+    AutoExtractSet,
+    FavoriteDestination,
+    JOB_STATUSES,
+    RETRYABLE_JOB_STATUSES,
+    Job,
+    TransferStatus,
+    utcnow_iso,
+)
 from process_utils import stop_process
 from storage import JsonStorage
 
@@ -54,6 +66,10 @@ MEGACMD_LS_SUMMARY_RE = re.compile(
 )
 MEGACMD_DU_RE = re.compile(r"^\s*(?P<size>\d+)(?:\s+(?P<path>.+?))?\s*$")
 MEGACMD_SEPARATOR_RE = re.compile(r"^[\-\s]{3,}$")
+SEVEN_ZIP_SPLIT_PART_RE = re.compile(r"^(?P<base>.+)\.7z\.(?P<index>\d+)$", re.IGNORECASE)
+RAR_PART_ANY_RE = re.compile(r"^(?P<base>.+)\.part(?P<index>\d+)\.rar$", re.IGNORECASE)
+RAR_MAIN_RE = re.compile(r"^(?P<base>.+)\.rar$", re.IGNORECASE)
+RAR_OLD_STYLE_PART_RE = re.compile(r"^(?P<base>.+)\.r(?P<index>\d{2,})$", re.IGNORECASE)
 
 
 class DownloadError(Exception):
@@ -384,6 +400,81 @@ def looks_like_absolute_path(raw_path: str) -> bool:
         return False
     path = raw_path.strip()
     return path.startswith(("/", "\\")) or Path(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def is_placeholder_display_name(display_name: str | None) -> bool:
+    return not str(display_name or "").strip() or str(display_name).strip() == "Resolving file name..."
+
+
+def archive_set_hint_from_name(name: str | None) -> dict | None:
+    cleaned = str(name or "").strip()
+    if is_placeholder_display_name(cleaned):
+        return None
+
+    split_match = SEVEN_ZIP_SPLIT_PART_RE.match(cleaned)
+    if split_match:
+        return {
+            "archive_type": "7z",
+            "multipart_style": "7z_split",
+            "group_key": f"7z_split:{split_match.group('base').casefold()}",
+            "base": split_match.group("base"),
+            "part_index": int(split_match.group("index")),
+            "filename": cleaned,
+        }
+
+    rar_part_match = RAR_PART_ANY_RE.match(cleaned)
+    if rar_part_match:
+        return {
+            "archive_type": "rar",
+            "multipart_style": "rar_part",
+            "group_key": f"rar_part:{rar_part_match.group('base').casefold()}",
+            "base": rar_part_match.group("base"),
+            "part_index": int(rar_part_match.group("index")),
+            "filename": cleaned,
+        }
+
+    rar_old_part_match = RAR_OLD_STYLE_PART_RE.match(cleaned)
+    if rar_old_part_match:
+        return {
+            "archive_type": "rar",
+            "multipart_style": "rar_old",
+            "group_key": f"rar_old:{rar_old_part_match.group('base').casefold()}",
+            "base": rar_old_part_match.group("base"),
+            "part_index": int(rar_old_part_match.group("index")),
+            "filename": cleaned,
+        }
+
+    suffix = Path(cleaned).suffix.lower()
+    if suffix == ".zip":
+        return {
+            "archive_type": "zip",
+            "multipart_style": "standalone",
+            "group_key": f"zip:{cleaned.casefold()}",
+            "base": cleaned,
+            "part_index": None,
+            "filename": cleaned,
+        }
+    if suffix == ".7z":
+        return {
+            "archive_type": "7z",
+            "multipart_style": "standalone",
+            "group_key": f"7z:{cleaned.casefold()}",
+            "base": cleaned,
+            "part_index": None,
+            "filename": cleaned,
+        }
+
+    rar_main_match = RAR_MAIN_RE.match(cleaned)
+    if rar_main_match:
+        return {
+            "archive_type": "rar",
+            "multipart_style": "rar_main",
+            "group_key": f"rar_main:{rar_main_match.group('base').casefold()}",
+            "base": rar_main_match.group("base"),
+            "part_index": None,
+            "filename": cleaned,
+        }
+    return None
 
 
 def ensure_destination_writable(destination_path: Path) -> None:
@@ -856,6 +947,7 @@ class DownloadManager:
         self.favorite_destinations: dict[str, dict] = {}
         self.hidden_base_destination_keys: set[str] = set()
         self.destinations = dict(self.base_destinations)
+        self.archive_automation_settings = ArchiveAutomationSettings()
         self.megacmd_binary = megacmd_binary
         self.backend_name = backend
         self._lock = threading.RLock()
@@ -870,12 +962,16 @@ class DownloadManager:
         self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
         self._jobs: dict[str, Job] = {}
+        self._auto_extract_sets: dict[str, AutoExtractSet] = {}
+        self._archive_manager = None
         self.queue_sort_mode = "oldest"
         self.backend_reason: str | None = None
         self.adapter = self._select_adapter()
         self._load_hidden_base_destinations()
         self._load_favorites()
+        self._load_archive_automation_settings()
         self._load_jobs()
+        self._load_auto_extract_sets()
         self._worker.start()
 
     def _log(self, level: str, feature: str, message: str, *, job: Job | None = None, context: dict | None = None) -> None:
@@ -921,6 +1017,16 @@ class DownloadManager:
                 self._jobs[job.id] = job
             self._rebuild_queue_locked()
 
+    def _load_archive_automation_settings(self) -> None:
+        with self._lock:
+            self.archive_automation_settings = self.storage.load_archive_automation_settings()
+
+    def _load_auto_extract_sets(self) -> None:
+        loaded_sets = self.storage.load_auto_extract_sets()
+        with self._lock:
+            self._auto_extract_sets = {item.id: item for item in loaded_sets}
+            self._sync_auto_extract_sets_locked()
+
     def _load_favorites(self) -> None:
         loaded_favorites = self.storage.load_favorites()
         with self._lock:
@@ -958,6 +1064,461 @@ class DownloadManager:
             )
             for item in self.favorite_destinations.values()
         ]
+
+    def attach_archive_manager(self, archive_manager) -> None:
+        with self._lock:
+            self._archive_manager = archive_manager
+            self._sync_auto_extract_sets_locked()
+            self._persist_locked(force=True)
+
+    def archive_automation_settings_payload(self) -> dict:
+        with self._lock:
+            return self.archive_automation_settings.to_dict()
+
+    def update_archive_automation_settings(
+        self,
+        *,
+        auto_sort_enabled: bool,
+        auto_delete_enabled: bool,
+    ) -> dict:
+        with self._lock:
+            self.archive_automation_settings = ArchiveAutomationSettings(
+                auto_sort_enabled=auto_sort_enabled,
+                auto_delete_enabled=auto_delete_enabled,
+            ).normalized()
+            self._persist_locked(force=True)
+            return self.archive_automation_settings.to_dict()
+
+    def _archive_manager_job_payload_locked(self, archive_job_id: str | None) -> dict | None:
+        if not archive_job_id or self._archive_manager is None:
+            return None
+        getter = getattr(self._archive_manager, "job_payload", None)
+        if callable(getter):
+            try:
+                return getter(archive_job_id)
+            except Exception:
+                LOGGER.debug("Archive job payload lookup failed for %s", archive_job_id, exc_info=True)
+                return None
+        return None
+
+    def _resolve_archive_auto_sort_targets_locked(self) -> tuple[str | None, str | None]:
+        settings = self.archive_automation_settings.normalized()
+        if not settings.auto_sort_enabled:
+            return None, None
+
+        available, reason = guessit_available()
+        if not available:
+            raise ValueError(reason or "Archive auto-sort is unavailable.")
+
+        favorites = self.storage.load_move_favorites()
+
+        def target_for_label(label: str) -> str:
+            matches = [favorite for favorite in favorites if favorite.label.casefold() == label.casefold()]
+            if not matches:
+                raise ValueError(
+                    f"Archive automation requires exactly one saved move favorite named '{label}'."
+                )
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Archive automation found multiple saved move favorites named '{label}'. Keep exactly one."
+                )
+            target_path = Path(matches[0].path).expanduser().resolve()
+            ensure_destination_writable(target_path)
+            return str(target_path)
+
+        return target_for_label("Movies"), target_for_label("TvShows")
+
+    def _batch_destination_directory_locked(self, jobs: list[Job]) -> Path:
+        return Path(jobs[0].destination_path).expanduser().resolve()
+
+    def _batch_destination_relative_dir_locked(self, jobs: list[Job]) -> str:
+        return jobs[0].destination_relative_path.strip("/")
+
+    def _batch_disk_filenames_locked(self, destination_dir: Path) -> dict[str, str]:
+        try:
+            return {
+                child.name.casefold(): child.name
+                for child in destination_dir.iterdir()
+                if child.is_file()
+            }
+        except FileNotFoundError:
+            return {}
+
+    def _auto_extract_identity(self, batch_id: str, destination_path: str, set_key: str) -> tuple[str, str, str]:
+        return batch_id, os.path.normcase(destination_path), set_key
+
+    def _build_auto_extract_candidate_sets_locked(self, batch_jobs: list[Job]) -> list[dict]:
+        if not batch_jobs:
+            return []
+
+        destination_dir = self._batch_destination_directory_locked(batch_jobs)
+        destination_relative_dir = self._batch_destination_relative_dir_locked(batch_jobs)
+        destination_key = batch_jobs[0].destination_key
+        destination_is_custom = bool(batch_jobs[0].destination_is_custom)
+        disk_filenames = self._batch_disk_filenames_locked(destination_dir)
+
+        raw_hints: list[tuple[Job, dict]] = []
+        batch_rar_old_bases: set[str] = set()
+        disk_rar_old_bases: set[str] = set()
+        for disk_name in disk_filenames.values():
+            disk_match = RAR_OLD_STYLE_PART_RE.match(disk_name)
+            if disk_match:
+                disk_rar_old_bases.add(disk_match.group("base").casefold())
+
+        for job in batch_jobs:
+            hint = archive_set_hint_from_name(job.display_name)
+            if not hint:
+                continue
+            raw_hints.append((job, hint))
+            if hint["multipart_style"] == "rar_old":
+                batch_rar_old_bases.add(str(hint["base"]).casefold())
+
+        groups: dict[str, dict] = {}
+        for job, hint in raw_hints:
+            archive_type = str(hint["archive_type"])
+            filename = str(hint["filename"])
+            base = str(hint["base"])
+            style = str(hint["multipart_style"])
+            final_group_key = str(hint["group_key"])
+            final_style = style
+            if style == "rar_main":
+                base_key = base.casefold()
+                if base_key in batch_rar_old_bases or base_key in disk_rar_old_bases:
+                    final_group_key = f"rar_old:{base_key}"
+                    final_style = "rar_old"
+                else:
+                    final_group_key = f"rar:{filename.casefold()}"
+                    final_style = "standalone"
+
+            group = groups.setdefault(
+                final_group_key,
+                {
+                    "set_key": final_group_key,
+                    "archive_type": archive_type,
+                    "multipart_style": final_style,
+                    "base": base,
+                    "destination_key": destination_key,
+                    "destination_path": str(destination_dir),
+                    "destination_relative_path": destination_relative_dir,
+                    "destination_is_custom": destination_is_custom,
+                    "job_ids": [],
+                    "jobs": [],
+                    "expected_filenames": set(),
+                    "entrypoint_filename": None,
+                    "auto_sort_enabled": False,
+                    "auto_delete_enabled": False,
+                    "movies_target_path": None,
+                    "tv_target_path": None,
+                },
+            )
+            if job.id not in group["job_ids"]:
+                group["job_ids"].append(job.id)
+                group["jobs"].append(job)
+            group["auto_sort_enabled"] = group["auto_sort_enabled"] or bool(job.archive_auto_sort_enabled)
+            group["auto_delete_enabled"] = group["auto_delete_enabled"] or bool(job.archive_auto_delete_enabled)
+            group["movies_target_path"] = group["movies_target_path"] or job.archive_movies_target_path
+            group["tv_target_path"] = group["tv_target_path"] or job.archive_tv_target_path
+
+            if final_style == "standalone":
+                group["expected_filenames"].add(filename)
+                group["entrypoint_filename"] = group["entrypoint_filename"] or filename
+            elif final_style == "7z_split":
+                group["expected_filenames"].add(filename)
+                if int(hint["part_index"] or 0) == 1:
+                    group["entrypoint_filename"] = group["entrypoint_filename"] or filename
+            elif final_style == "rar_part":
+                group["expected_filenames"].add(filename)
+                if int(hint["part_index"] or 0) == 1:
+                    group["entrypoint_filename"] = group["entrypoint_filename"] or filename
+            elif final_style == "rar_old":
+                group["expected_filenames"].add(filename)
+                if style == "rar_main":
+                    group["entrypoint_filename"] = group["entrypoint_filename"] or filename
+
+        for group in groups.values():
+            base_key = str(group["base"]).casefold()
+            style = str(group["multipart_style"])
+            if style == "7z_split":
+                for disk_name in disk_filenames.values():
+                    disk_match = SEVEN_ZIP_SPLIT_PART_RE.match(disk_name)
+                    if not disk_match or disk_match.group("base").casefold() != base_key:
+                        continue
+                    group["expected_filenames"].add(disk_name)
+                    if int(disk_match.group("index")) == 1:
+                        group["entrypoint_filename"] = group["entrypoint_filename"] or disk_name
+            elif style == "rar_part":
+                for disk_name in disk_filenames.values():
+                    disk_match = RAR_PART_ANY_RE.match(disk_name)
+                    if not disk_match or disk_match.group("base").casefold() != base_key:
+                        continue
+                    group["expected_filenames"].add(disk_name)
+                    if int(disk_match.group("index")) == 1:
+                        group["entrypoint_filename"] = group["entrypoint_filename"] or disk_name
+            elif style == "rar_old":
+                main_filename = f"{group['base']}.rar"
+                if main_filename.casefold() in disk_filenames:
+                    actual_name = disk_filenames[main_filename.casefold()]
+                    group["expected_filenames"].add(actual_name)
+                    group["entrypoint_filename"] = group["entrypoint_filename"] or actual_name
+                for disk_name in disk_filenames.values():
+                    disk_match = RAR_OLD_STYLE_PART_RE.match(disk_name)
+                    if disk_match and disk_match.group("base").casefold() == base_key:
+                        group["expected_filenames"].add(disk_name)
+
+        candidates: list[dict] = []
+        for group in groups.values():
+            entrypoint_filename = group["entrypoint_filename"]
+            if entrypoint_filename:
+                entrypoint_path = destination_dir / entrypoint_filename
+                target_name = default_archive_target_name(Path(entrypoint_filename))
+                target_path = destination_dir / target_name
+                if destination_relative_dir:
+                    archive_relative_path = str(Path(destination_relative_dir) / entrypoint_filename).replace("\\", "/")
+                    target_relative_path = str(Path(destination_relative_dir) / target_name).replace("\\", "/")
+                else:
+                    archive_relative_path = entrypoint_filename
+                    target_relative_path = target_name
+            else:
+                entrypoint_path = None
+                target_name = str(group["base"])
+                target_path = destination_dir / target_name
+                archive_relative_path = ""
+                target_relative_path = str(Path(destination_relative_dir) / target_name).replace("\\", "/") if destination_relative_dir else target_name
+
+            expected_filenames = sorted(group["expected_filenames"], key=str.casefold)
+            expected_name_keys = {item.casefold() for item in expected_filenames}
+            missing_filenames = [
+                item
+                for item in expected_filenames
+                if item.casefold() not in disk_filenames
+            ]
+            failed_jobs = [job for job in group["jobs"] if job.status == "failed"]
+            canceled_jobs = [job for job in group["jobs"] if job.status == "canceled"]
+            paused_jobs = [job for job in group["jobs"] if job.status == "paused"]
+
+            auto_sort_enabled = bool(group["auto_sort_enabled"])
+            auto_delete_enabled = bool(group["auto_delete_enabled"] and auto_sort_enabled)
+            movies_target_path = group["movies_target_path"]
+            tv_target_path = group["tv_target_path"]
+
+            if failed_jobs:
+                status = "failed"
+                error = "Waiting for failed archive part(s) to be retried."
+                last_message = error
+            elif canceled_jobs:
+                status = "canceled"
+                error = "Blocked by canceled archive part(s)."
+                last_message = error
+            elif not entrypoint_filename:
+                status = "waiting"
+                error = None
+                if paused_jobs:
+                    last_message = "Waiting for the archive entrypoint and paused parts to resume."
+                else:
+                    last_message = "Waiting for the archive entrypoint file."
+            elif missing_filenames:
+                status = "waiting"
+                error = None
+                last_message = f"Waiting for {len(missing_filenames)} archive part(s)."
+            else:
+                status = "ready"
+                error = None
+                last_message = "All archive parts are present."
+
+            candidates.append(
+                {
+                    "batch_id": batch_jobs[0].batch_id,
+                    "destination_key": destination_key,
+                    "destination_path": str(destination_dir),
+                    "destination_relative_path": destination_relative_dir,
+                    "destination_is_custom": destination_is_custom,
+                    "set_key": str(group["set_key"]),
+                    "archive_type": str(group["archive_type"]),
+                    "multipart_style": str(group["multipart_style"]),
+                    "archive_relative_path": archive_relative_path,
+                    "entrypoint_filename": entrypoint_filename or "",
+                    "entrypoint_path": str(entrypoint_path) if entrypoint_path else None,
+                    "expected_part_filenames": expected_filenames,
+                    "expected_name_keys": expected_name_keys,
+                    "job_ids": list(group["job_ids"]),
+                    "auto_sort_enabled": auto_sort_enabled,
+                    "auto_delete_enabled": auto_delete_enabled,
+                    "movies_target_path": movies_target_path,
+                    "tv_target_path": tv_target_path,
+                    "target_relative_path": target_relative_path,
+                    "target_path": str(target_path),
+                    "status": status,
+                    "error": error,
+                    "last_message": last_message,
+                }
+            )
+
+        return candidates
+
+    def _sync_auto_extract_sets_locked(self, batch_ids: set[str] | None = None) -> None:
+        all_batch_ids = {
+            job.batch_id
+            for job in self._jobs.values()
+            if job.auto_extract_enabled
+        } | {item.batch_id for item in self._auto_extract_sets.values()}
+        scoped_batch_ids = set(batch_ids or all_batch_ids)
+        if not scoped_batch_ids:
+            return
+
+        existing_by_identity = {
+            self._auto_extract_identity(item.batch_id, item.destination_path, item.set_key): item
+            for item in self._auto_extract_sets.values()
+        }
+        next_sets: dict[str, AutoExtractSet] = {
+            item.id: item
+            for item in self._auto_extract_sets.values()
+            if item.batch_id not in scoped_batch_ids
+        }
+
+        for batch_id in sorted(scoped_batch_ids):
+            batch_jobs = [
+                job
+                for job in self._jobs.values()
+                if job.batch_id == batch_id and job.auto_extract_enabled
+            ]
+            if not batch_jobs:
+                continue
+
+            for candidate in self._build_auto_extract_candidate_sets_locked(batch_jobs):
+                identity = self._auto_extract_identity(
+                    batch_id,
+                    str(candidate["destination_path"]),
+                    str(candidate["set_key"]),
+                )
+                existing = existing_by_identity.get(identity)
+                if existing is None:
+                    existing = AutoExtractSet(
+                        id=uuid.uuid4().hex,
+                        batch_id=batch_id,
+                        destination_key=str(candidate["destination_key"]),
+                        destination_path=str(candidate["destination_path"]),
+                        destination_relative_path=str(candidate["destination_relative_path"]),
+                        destination_is_custom=bool(candidate["destination_is_custom"]),
+                        set_key=str(candidate["set_key"]),
+                        archive_type=str(candidate["archive_type"]),
+                        multipart_style=str(candidate["multipart_style"]),
+                        archive_relative_path=str(candidate["archive_relative_path"]),
+                        entrypoint_filename=str(candidate["entrypoint_filename"]),
+                        expected_part_filenames=list(candidate["expected_part_filenames"]),
+                        job_ids=list(candidate["job_ids"]),
+                        auto_sort_enabled=bool(candidate["auto_sort_enabled"]),
+                        auto_delete_enabled=bool(candidate["auto_delete_enabled"]),
+                        movies_target_path=candidate["movies_target_path"],
+                        tv_target_path=candidate["tv_target_path"],
+                        target_relative_path=str(candidate["target_relative_path"]),
+                        target_path=str(candidate["target_path"]),
+                    )
+                    if self.event_logger:
+                        self.event_logger.log(
+                            "info",
+                            "download",
+                            "auto_extract",
+                            "Created auto-extract set.",
+                            batch_id=batch_id,
+                            context={
+                                "set_key": existing.set_key,
+                                "archive_type": existing.archive_type,
+                                "expected_parts": len(existing.expected_part_filenames),
+                            },
+                        )
+
+                existing.destination_key = str(candidate["destination_key"])
+                existing.destination_path = str(candidate["destination_path"])
+                existing.destination_relative_path = str(candidate["destination_relative_path"])
+                existing.destination_is_custom = bool(candidate["destination_is_custom"])
+                existing.archive_type = str(candidate["archive_type"])
+                existing.multipart_style = str(candidate["multipart_style"])
+                existing.archive_relative_path = str(candidate["archive_relative_path"])
+                existing.entrypoint_filename = str(candidate["entrypoint_filename"])
+                existing.expected_part_filenames = list(candidate["expected_part_filenames"])
+                existing.job_ids = list(candidate["job_ids"])
+                existing.auto_sort_enabled = bool(candidate["auto_sort_enabled"])
+                existing.auto_delete_enabled = bool(candidate["auto_delete_enabled"])
+                existing.movies_target_path = candidate["movies_target_path"]
+                existing.tv_target_path = candidate["tv_target_path"]
+                existing.target_relative_path = str(candidate["target_relative_path"])
+                existing.target_path = str(candidate["target_path"])
+
+                archive_payload = self._archive_manager_job_payload_locked(existing.archive_job_id)
+                if archive_payload is not None:
+                    archive_status = str(archive_payload["status"])
+                    existing.last_message = str(
+                        archive_payload.get("transfer", {}).get("last_message")
+                        or archive_payload.get("error")
+                        or existing.last_message
+                    )
+                    existing.error = archive_payload.get("error")
+                    if archive_status == "queued":
+                        existing.status = "queued_for_extract"
+                    elif archive_status in {"probing", "extracting", "sorting", "cleaning"}:
+                        existing.status = "extracting"
+                    elif archive_status in {"completed", "failed", "canceled"}:
+                        existing.status = archive_status
+                    else:
+                        existing.status = "queued_for_extract"
+                else:
+                    existing.status = str(candidate["status"])
+                    existing.error = candidate["error"]
+                    existing.last_message = str(candidate["last_message"])
+
+                    if existing.status == "ready" and existing.archive_job_id is None and self._archive_manager is not None:
+                        prepared_job = {
+                            "root_key": existing.destination_key,
+                            "archive_relative_path": existing.archive_relative_path or existing.entrypoint_filename,
+                            "archive_path": str(Path(existing.destination_path) / existing.entrypoint_filename),
+                            "archive_display_name": existing.entrypoint_filename,
+                            "archive_type": existing.archive_type,
+                            "target_relative_path": existing.target_relative_path,
+                            "target_path": existing.target_path,
+                            "auto_sort_enabled": existing.auto_sort_enabled,
+                            "auto_delete_enabled": existing.auto_delete_enabled,
+                            "movies_target_path": existing.movies_target_path,
+                            "tv_target_path": existing.tv_target_path,
+                        }
+                        try:
+                            archive_jobs = self._archive_manager.submit([prepared_job])
+                        except Exception as exc:
+                            existing.status = "failed"
+                            existing.error = str(exc)
+                            existing.last_message = str(exc)
+                            if self.event_logger:
+                                self.event_logger.log(
+                                    "error",
+                                    "download",
+                                    "auto_extract",
+                                    "Automatic archive extraction queueing failed.",
+                                    batch_id=batch_id,
+                                    context={"set_key": existing.set_key, "error": str(exc)},
+                                )
+                        else:
+                            if archive_jobs:
+                                existing.archive_job_id = archive_jobs[0].id
+                                existing.status = "queued_for_extract"
+                                existing.error = None
+                                existing.last_message = "Archive extraction queued automatically."
+                                if self.event_logger:
+                                    self.event_logger.log(
+                                        "info",
+                                        "download",
+                                        "auto_extract",
+                                        "Queued archive extraction automatically.",
+                                        batch_id=batch_id,
+                                        context={
+                                            "set_key": existing.set_key,
+                                            "archive_job_id": existing.archive_job_id,
+                                            "expected_parts": len(existing.expected_part_filenames),
+                                        },
+                                    )
+
+                existing.touch()
+                next_sets[existing.id] = existing
+
+        self._auto_extract_sets = next_sets
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -1062,6 +1623,7 @@ class DownloadManager:
         destination_subpath: str = "",
         *,
         metadata_overrides: dict[str, dict[str, int | str | None]] | None = None,
+        auto_extract_enabled: bool = False,
     ) -> list[Job]:
         if self.backend_name == "unavailable":
             raise ValueError(self.backend_reason or "The downloader backend is unavailable.")
@@ -1069,6 +1631,12 @@ class DownloadManager:
             raise ValueError("No destinations are configured. Restore or add a destination before submitting downloads.")
         destination_path, destination_relative_path, destination_is_custom = self.resolve_destination(destination_key, destination_subpath)
         ensure_destination_writable(destination_path)
+        with self._lock:
+            archive_settings = self.archive_automation_settings.normalized()
+            if auto_extract_enabled and archive_settings.auto_sort_enabled:
+                movies_target_path, tv_target_path = self._resolve_archive_auto_sort_targets_locked()
+            else:
+                movies_target_path, tv_target_path = None, None
         batch_id = uuid.uuid4().hex[:12]
         prepared_jobs: list[dict] = []
         metadata_overrides = metadata_overrides or {}
@@ -1097,6 +1665,11 @@ class DownloadManager:
                         if override_metadata.get("bytes_total") is not None
                         else metadata.get("bytes_total")
                     ),
+                    "auto_extract_enabled": bool(auto_extract_enabled),
+                    "archive_auto_sort_enabled": bool(auto_extract_enabled and archive_settings.auto_sort_enabled),
+                    "archive_auto_delete_enabled": bool(auto_extract_enabled and archive_settings.auto_delete_enabled),
+                    "archive_movies_target_path": movies_target_path,
+                    "archive_tv_target_path": tv_target_path,
                 }
             )
         new_jobs: list[Job] = []
@@ -1111,6 +1684,11 @@ class DownloadManager:
                     destination_relative_path=destination_relative_path,
                     display_name=str(prepared["display_name"]),
                     destination_is_custom=destination_is_custom,
+                    auto_extract_enabled=bool(prepared["auto_extract_enabled"]),
+                    archive_auto_sort_enabled=bool(prepared["archive_auto_sort_enabled"]),
+                    archive_auto_delete_enabled=bool(prepared["archive_auto_delete_enabled"]),
+                    archive_movies_target_path=prepared["archive_movies_target_path"],
+                    archive_tv_target_path=prepared["archive_tv_target_path"],
                     transfer=TransferStatus(
                         bytes_total=prepared["bytes_total"],
                         started_at=None,
@@ -1119,6 +1697,8 @@ class DownloadManager:
                 self._jobs[job.id] = job
                 new_jobs.append(job)
             self._rebuild_queue_locked()
+            if auto_extract_enabled:
+                self._sync_auto_extract_sets_locked({batch_id})
             self._persist_locked(force=True)
         if new_jobs:
             self._log(
@@ -1126,7 +1706,11 @@ class DownloadManager:
                 "queued",
                 "Queued download jobs.",
                 job=new_jobs[0],
-                context={"job_count": len(new_jobs), "destination_key": destination_key},
+                context={
+                    "job_count": len(new_jobs),
+                    "destination_key": destination_key,
+                    "auto_extract_enabled": bool(auto_extract_enabled),
+                },
             )
         return new_jobs
 
@@ -1330,6 +1914,8 @@ class DownloadManager:
                 job.transfer.finished_at = utcnow_iso()
                 job.touch()
                 self._rebuild_queue_locked()
+                if job.auto_extract_enabled:
+                    self._sync_auto_extract_sets_locked({job.batch_id})
                 self._persist_locked(force=True)
                 self._log("info", "cancel", "Canceled queued download before start.", job=job)
                 return job
@@ -1341,6 +1927,8 @@ class DownloadManager:
                 job.touch()
                 self._pause_events.pop(job_id, None)
                 self._rebuild_queue_locked()
+                if job.auto_extract_enabled:
+                    self._sync_auto_extract_sets_locked({job.batch_id})
                 self._persist_locked(force=True)
                 self._log("info", "cancel", "Canceled paused download before resume.", job=job)
                 return job
@@ -1359,7 +1947,10 @@ class DownloadManager:
         with self._lock:
             removed = 0
             canceling = 0
+            affected_batch_ids: set[str] = set()
             for job_id, job in list(self._jobs.items()):
+                if job.auto_extract_enabled:
+                    affected_batch_ids.add(job.batch_id)
                 if job.status in ACTIVE_JOB_STATUSES or (job.status == "paused" and self._has_live_runtime_locked(job_id)):
                     canceling += 1
                     self._purge_on_finish.add(job_id)
@@ -1375,6 +1966,8 @@ class DownloadManager:
                 self._purge_on_finish.discard(job_id)
 
             self._rebuild_queue_locked()
+            if affected_batch_ids:
+                self._sync_auto_extract_sets_locked(affected_batch_ids)
             self._persist_locked(force=True)
             return {"removed": removed, "canceling": canceling}
 
@@ -1393,6 +1986,8 @@ class DownloadManager:
             self._progress_samples.pop(job_id, None)
             self._purge_on_finish.discard(job_id)
             self._rebuild_queue_locked()
+            if job.auto_extract_enabled:
+                self._sync_auto_extract_sets_locked({job.batch_id})
             self._persist_locked(force=True)
             self._log("info", "retry", "Re-queued download job.", job=job)
             return job
@@ -1477,8 +2072,16 @@ class DownloadManager:
             self._persist_locked(force=True)
             return {"sorted": len(queued_jobs), "sort_by": sort_by, "label": self.QUEUE_SORT_LABELS[sort_by]}
 
+    def _auto_extract_set_payload(self, item: AutoExtractSet) -> dict:
+        payload = item.to_dict()
+        payload["status_label"] = item.status.replace("_", " ").title()
+        payload["expected_part_count"] = len(item.expected_part_filenames)
+        payload["linked_job_count"] = len(item.job_ids)
+        return payload
+
     def dashboard_payload(self) -> dict:
         with self._lock:
+            self._sync_auto_extract_sets_locked()
             queued_job_ids = self._queued_job_ids_locked()
             queued_jobs = [self._jobs[job_id] for job_id in queued_job_ids if job_id in self._jobs]
             live_jobs = [job for job in self._jobs.values() if job.status in ACTIVE_JOB_STATUSES]
@@ -1496,6 +2099,10 @@ class DownloadManager:
             jobs = active_jobs + queued_jobs + finished_jobs
             destination_lookup = {item["key"]: item["label"] for item in self.destination_options()}
             job_dicts = [self._job_payload(job, destination_lookup) for job in jobs]
+            auto_extract_payloads = [
+                self._auto_extract_set_payload(item)
+                for item in sorted(self._auto_extract_sets.values(), key=lambda current: (current.created_at, current.id))
+            ]
 
         batches: dict[str, dict] = {}
         summary = {
@@ -1547,6 +2154,10 @@ class DownloadManager:
                     "eta_seconds": None,
                     "has_unknown_total": False,
                     "status_counts": {},
+                    "auto_extract_enabled": False,
+                    "auto_extract_unresolved_jobs": 0,
+                    "auto_extract_sets": [],
+                    "auto_extract_status_counts": {},
                 },
             )
             batch["jobs"].append(job)
@@ -1561,6 +2172,19 @@ class DownloadManager:
             if job["transfer"]["eta_seconds"] is not None:
                 batch["eta_seconds"] = max(batch["eta_seconds"] or 0, job["transfer"]["eta_seconds"])
             batch["status_counts"][job["status"]] = batch["status_counts"].get(job["status"], 0) + 1
+            if job.get("auto_extract_enabled"):
+                batch["auto_extract_enabled"] = True
+                if is_placeholder_display_name(job.get("display_name")):
+                    batch["auto_extract_unresolved_jobs"] += 1
+
+        for auto_extract_set in auto_extract_payloads:
+            batch = batches.get(auto_extract_set["batch_id"])
+            if not batch:
+                continue
+            batch["auto_extract_enabled"] = True
+            batch["auto_extract_sets"].append(auto_extract_set)
+            status = auto_extract_set["status"]
+            batch["auto_extract_status_counts"][status] = batch["auto_extract_status_counts"].get(status, 0) + 1
 
         return {
             "backend": {
@@ -1575,6 +2199,7 @@ class DownloadManager:
             "summary": summary,
             "jobs": job_dicts,
             "batches": list(batches.values()),
+            "archive_automation_settings": self.archive_automation_settings.to_dict(),
             "queue_sort": self.queue_sort_mode,
             "bulk_pause_toggle": self.bulk_pause_toggle(),
             "updated_at": utcnow_iso(),
@@ -1626,6 +2251,9 @@ class DownloadManager:
             payload["can_cancel"] = True
         payload["can_retry"] = job.status in RETRYABLE_JOB_STATUSES
         payload["status_label"] = job.status.replace("_", " ").title()
+        payload["auto_extract_enabled"] = job.auto_extract_enabled
+        payload["archive_auto_sort_enabled"] = job.archive_auto_sort_enabled
+        payload["archive_auto_delete_enabled"] = job.archive_auto_delete_enabled
         return payload
 
     def _worker_loop(self) -> None:
@@ -1702,6 +2330,7 @@ class DownloadManager:
             status = kwargs.get("status")
             pause_event = self._pause_events.get(job_id)
             pause_requested = bool(pause_event and pause_event.is_set())
+            display_name_changed = False
             if status in JOB_STATUSES and not (pause_requested and status in ACTIVE_JOB_STATUSES):
                 job.status = status
             if job.status == "paused":
@@ -1710,6 +2339,7 @@ class DownloadManager:
                 previous_name = job.display_name
                 job.display_name = kwargs["display_name"]
                 if kwargs["display_name"] != previous_name:
+                    display_name_changed = True
                     self._log("debug", "metadata", "Resolved download display name.", job=job, context={"display_name": kwargs["display_name"]})
 
             transfer = job.transfer
@@ -1751,6 +2381,8 @@ class DownloadManager:
             )
 
             job.touch()
+            if job.auto_extract_enabled and display_name_changed:
+                self._sync_auto_extract_sets_locked({job.batch_id})
             self._persist_locked(force=False)
 
     def _derive_transfer_metrics(
@@ -1806,12 +2438,15 @@ class DownloadManager:
 
             if job_id in self._purge_on_finish:
                 self._log("info", "clear", "Purged download after clear-queue cancellation completed.", job=job)
+                batch_id = job.batch_id if job.auto_extract_enabled else None
                 self._jobs.pop(job_id, None)
                 self._cancel_events.pop(job_id, None)
                 self._pause_events.pop(job_id, None)
                 self._active_processes.pop(job_id, None)
                 self._progress_samples.pop(job_id, None)
                 self._purge_on_finish.discard(job_id)
+                if batch_id:
+                    self._sync_auto_extract_sets_locked({batch_id})
                 self._persist_locked(force=True)
                 return
 
@@ -1826,6 +2461,8 @@ class DownloadManager:
             job.transfer.paused = False
             job.transfer.speed_bps = None
             job.touch()
+            if job.auto_extract_enabled:
+                self._sync_auto_extract_sets_locked({job.batch_id})
             self._persist_locked(force=True)
             if status == "completed":
                 self._log("info", "completed", "Download finished successfully.", job=job)
@@ -1842,6 +2479,8 @@ class DownloadManager:
             self._jobs.values(),
             self._favorite_models(),
             self.hidden_base_destination_keys,
+            auto_extract_sets=self._auto_extract_sets.values(),
+            archive_automation_settings=self.archive_automation_settings,
         )
         self._last_persist = now
 

@@ -16,6 +16,8 @@
     const mediaBackendNote = document.getElementById("media-backend-note");
     const updatedLabel = document.getElementById("dashboard-updated");
     const bulkPauseToggleButton = document.getElementById("bulk-pause-toggle");
+    const dashboardArchiveAutoSortCheckbox = document.getElementById("dashboard-archive-auto-sort");
+    const dashboardArchiveAutoDeleteCheckbox = document.getElementById("dashboard-archive-auto-delete");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
     const scrollStorageKey = `dashboard-scroll:${window.location.pathname}`;
     const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -158,6 +160,7 @@
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
     const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting" || status === "cleaning";
     const isMediaActiveStatus = (status) => status === "scanning" || status === "compiling" || status === "verifying";
+    const isAutoExtractActiveStatus = (status) => status === "ready" || status === "queued_for_extract" || status === "extracting";
 
     const progressPercent = (transfer) => {
         if (transfer?.bytes_total) {
@@ -384,6 +387,30 @@
         const statusSummary = Object.entries(batch.status_counts)
             .map(([status, count]) => `${status}: ${count}`)
             .join(" | ");
+        const autoExtractStatusSummary = Object.entries(batch.auto_extract_status_counts || {})
+            .map(([status, count]) => `${status.replaceAll("_", " ")}: ${count}`)
+            .join(" | ");
+        const autoExtractSets = Array.isArray(batch.auto_extract_sets) ? batch.auto_extract_sets : [];
+        const autoExtractSection = batch.auto_extract_enabled ? `
+            <div class="auto-extract-panel">
+                <div class="metric-row">
+                    <span>Auto Extract</span>
+                    <span>${escapeHtml(autoExtractStatusSummary || (batch.auto_extract_unresolved_jobs ? `waiting on ${batch.auto_extract_unresolved_jobs} unresolved filename(s)` : "enabled"))}</span>
+                </div>
+                ${autoExtractSets.length ? autoExtractSets.map((item) => `
+                    <div class="metric-row auto-extract-row">
+                        <span>${escapeHtml(item.entrypoint_filename || item.set_key)}</span>
+                        <span>${escapeHtml(item.status_label || item.status)}</span>
+                        <span>${escapeHtml(item.last_message || "Waiting for parts")}</span>
+                    </div>
+                `).join("") : `
+                    <div class="metric-row auto-extract-row">
+                        <span>${escapeHtml(batch.auto_extract_unresolved_jobs ? "Waiting for archive filenames" : "Waiting for archive parts")}</span>
+                        <span>${escapeHtml(batch.auto_extract_unresolved_jobs ? `${batch.auto_extract_unresolved_jobs} unresolved` : "No extractable sets yet")}</span>
+                    </div>
+                `}
+            </div>
+        ` : "";
 
         return `
             <section class="batch-card">
@@ -401,6 +428,7 @@
                     <span>${escapeHtml(etaLabel)}</span>
                 </div>
                 ${progressBar}
+                ${autoExtractSection}
                 <div class="job-list">${batch.jobs.map(renderJob).join("")}</div>
             </section>
         `;
@@ -588,6 +616,22 @@
             ? payload.batches.map(renderBatch).join("")
             : '<div class="stat-tile"><span>No jobs yet</span><strong>Queue is empty</strong><small class="subtle">Submit one or more MEGA URLs to begin.</small></div>';
     };
+
+    const updateArchiveAutomationCheckboxes = () => {
+        if (!dashboardArchiveAutoSortCheckbox || !dashboardArchiveAutoDeleteCheckbox) {
+            return;
+        }
+        dashboardArchiveAutoDeleteCheckbox.disabled = !dashboardArchiveAutoSortCheckbox.checked;
+        if (!dashboardArchiveAutoSortCheckbox.checked) {
+            dashboardArchiveAutoDeleteCheckbox.checked = false;
+        }
+    };
+
+    if (dashboardArchiveAutoSortCheckbox && dashboardArchiveAutoDeleteCheckbox) {
+        dashboardArchiveAutoSortCheckbox.addEventListener("change", updateArchiveAutomationCheckboxes);
+        dashboardArchiveAutoDeleteCheckbox.addEventListener("change", updateArchiveAutomationCheckboxes);
+        updateArchiveAutomationCheckboxes();
+    }
 
     const poll = async () => {
         try {

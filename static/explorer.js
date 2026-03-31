@@ -24,7 +24,6 @@
     const archiveSummary = document.getElementById("explorer-archive-summary");
     const initialArchivePayload = document.getElementById("initial-explorer-archives");
     const pollMs = Number(document.body.dataset.pollMs || 1500);
-    const archiveAutomationStorageKey = `explorer-archive-automation:${window.location.pathname}`;
 
     const escapeHtml = (value) => String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -84,34 +83,6 @@
 
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting" || status === "cleaning";
-
-    const readArchiveAutomationState = () => {
-        try {
-            const rawValue = localStorage.getItem(archiveAutomationStorageKey);
-            if (!rawValue) {
-                return null;
-            }
-            const parsed = JSON.parse(rawValue);
-            return {
-                autoSortEnabled: Boolean(parsed?.autoSortEnabled),
-                autoDeleteEnabled: Boolean(parsed?.autoDeleteEnabled),
-            };
-        } catch (error) {
-            console.debug("Explorer archive automation state could not be restored", error);
-            return null;
-        }
-    };
-
-    const writeArchiveAutomationState = () => {
-        try {
-            localStorage.setItem(archiveAutomationStorageKey, JSON.stringify({
-                autoSortEnabled: Boolean(autoSortCheckbox?.checked),
-                autoDeleteEnabled: Boolean(autoDeleteCheckbox?.checked),
-            }));
-        } catch (error) {
-            console.debug("Explorer archive automation state could not be saved", error);
-        }
-    };
 
     const buildProgressBar = (status, percent, indeterminate = false) => {
         let trackClass = "progress-track";
@@ -367,14 +338,12 @@
     if (autoSortCheckbox) {
         autoSortCheckbox.addEventListener("change", () => {
             updateSelectionUi();
-            writeArchiveAutomationState();
         });
     }
 
     if (autoDeleteCheckbox) {
         autoDeleteCheckbox.addEventListener("change", () => {
             updateSelectionUi();
-            writeArchiveAutomationState();
         });
     }
 
@@ -392,14 +361,6 @@
         compileButton.dataset.locked = "true";
     }
 
-    const initialArchiveAutomationState = readArchiveAutomationState();
-    if (initialArchiveAutomationState && autoSortCheckbox) {
-        autoSortCheckbox.checked = initialArchiveAutomationState.autoSortEnabled;
-        if (autoDeleteCheckbox) {
-            autoDeleteCheckbox.checked = initialArchiveAutomationState.autoDeleteEnabled;
-        }
-    }
-
     if (archiveJobList && initialArchivePayload) {
         try {
             const initialJobs = JSON.parse(initialArchivePayload.textContent || "[]");
@@ -412,5 +373,4 @@
     }
 
     updateSelectionUi();
-    writeArchiveAutomationState();
 })();
