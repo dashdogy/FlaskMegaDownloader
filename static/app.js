@@ -156,6 +156,7 @@
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
+    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting";
     const isMediaActiveStatus = (status) => status === "scanning" || status === "compiling" || status === "verifying";
 
     const progressPercent = (transfer) => {
@@ -479,7 +480,7 @@
 
     const renderArchiveJob = (job) => {
         const percent = progressPercent(job.transfer);
-        const progressBar = buildProgressBar(job.status, percent, isActiveStatus(job.status) && percent === null);
+        const progressBar = buildProgressBar(job.status, percent, isArchiveActiveStatus(job.status) && percent === null);
         const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
         const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";

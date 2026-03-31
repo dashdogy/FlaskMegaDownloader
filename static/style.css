@@ -429,6 +429,7 @@ button:disabled {
 .status-pill.active,
 .status-pill.downloading,
 .status-pill.probing,
+.status-pill.extracting,
 .status-pill.starting,
 .status-pill.scanning,
 .status-pill.compiling,

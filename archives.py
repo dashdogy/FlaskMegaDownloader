@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import math
+import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,6 +34,15 @@ class ArchiveProbe:
 
 SUPPORTED_ARCHIVE_SUFFIXES = {".zip", ".rar", ".7z"}
 SEVEN_ZIP_SPLIT_FIRST_RE = re.compile(r"^(?P<base>.+)\.7z\.001$", re.IGNORECASE)
+ZIP_THREAD_RESERVE = 4
+ZIP_CHUNK_SIZE = 1024 * 1024
+
+
+@dataclass(slots=True)
+class ZipMemberTarget:
+    member_name: str
+    target_path: Path
+    size: int
 
 
 def archive_type_for_path(path: Path) -> str | None:
@@ -103,6 +116,269 @@ def _member_size(member) -> int:
 
 def _archive_members(archive) -> list:
     return list(archive.infolist())
+
+
+def _read_text_if_exists(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _affinity_cpu_count() -> int | None:
+    sched_getaffinity = getattr(os, "sched_getaffinity", None)
+    if sched_getaffinity is None:
+        return None
+    try:
+        affinity = sched_getaffinity(0)
+    except OSError:
+        return None
+    if not affinity:
+        return None
+    return max(1, len(affinity))
+
+
+def _cgroup_v2_cpu_count(cgroup_root: Path) -> int | None:
+    payload = _read_text_if_exists(cgroup_root / "cpu.max")
+    if not payload:
+        return None
+    parts = payload.split()
+    if len(parts) < 2 or parts[0].lower() == "max":
+        return None
+    try:
+        quota = int(parts[0])
+        period = int(parts[1])
+    except ValueError:
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, math.ceil(quota / period))
+
+
+def _cgroup_v1_cpu_count(cgroup_root: Path) -> int | None:
+    candidates = [cgroup_root / "cpu", cgroup_root]
+    for candidate in candidates:
+        quota_text = _read_text_if_exists(candidate / "cpu.cfs_quota_us")
+        period_text = _read_text_if_exists(candidate / "cpu.cfs_period_us")
+        if quota_text is None or period_text is None:
+            continue
+        try:
+            quota = int(quota_text)
+            period = int(period_text)
+        except ValueError:
+            continue
+        if quota <= 0 or period <= 0:
+            return None
+        return max(1, math.ceil(quota / period))
+    return None
+
+
+def detect_effective_cpu_count(*, cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
+    detected_counts = [
+        count
+        for count in (
+            _affinity_cpu_count(),
+            _cgroup_v2_cpu_count(cgroup_root),
+            _cgroup_v1_cpu_count(cgroup_root),
+        )
+        if count is not None
+    ]
+    if detected_counts:
+        return max(1, min(detected_counts))
+    return max(1, os.cpu_count() or 1)
+
+
+def zip_extraction_worker_count(
+    *,
+    effective_cpu_count: int | None = None,
+    reserve_threads: int = ZIP_THREAD_RESERVE,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+) -> int:
+    detected_threads = effective_cpu_count if effective_cpu_count is not None else detect_effective_cpu_count(cgroup_root=cgroup_root)
+    return max(1, max(int(detected_threads), 1) - max(int(reserve_threads), 0))
+
+
+def _prepare_archive_targets(members: list, destination_dir: Path) -> tuple[list[Path], list[ZipMemberTarget], int]:
+    directory_targets: list[Path] = []
+    file_targets: list[ZipMemberTarget] = []
+    seen_targets: dict[str, str] = {}
+    total_bytes = 0
+
+    for member in members:
+        member_name = _member_name(member)
+        target_path = _safe_target_path(destination_dir, member_name)
+        dedupe_key = os.path.normcase(str(target_path))
+        previous_member = seen_targets.get(dedupe_key)
+        if previous_member is not None:
+            raise ArchiveError(
+                f"Archive members '{previous_member}' and '{member_name}' resolve to the same destination."
+            )
+        seen_targets[dedupe_key] = member_name
+
+        if _member_is_dir(member):
+            directory_targets.append(target_path)
+            continue
+
+        size = _member_size(member)
+        file_targets.append(
+            ZipMemberTarget(
+                member_name=member_name,
+                target_path=target_path,
+                size=size,
+            )
+        )
+        total_bytes += size
+
+    return directory_targets, file_targets, total_bytes
+
+
+def _ensure_target_directories(destination_dir: Path, directory_targets: list[Path], file_targets: list[ZipMemberTarget]) -> None:
+    parent_targets = {entry.target_path.parent for entry in file_targets}
+    all_directories = sorted(
+        {destination_dir, *directory_targets, *parent_targets},
+        key=lambda item: (len(item.parts), str(item)),
+    )
+    for directory in all_directories:
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except FileExistsError as exc:
+            relative_name = directory.relative_to(destination_dir).as_posix() if directory != destination_dir else "."
+            raise ArchiveError(f"Archive member '{relative_name}' conflicts with an existing file.") from exc
+
+
+def _extract_zip_member_with_archive(
+    archive_factory,
+    archive_path: Path,
+    entry: ZipMemberTarget,
+    *,
+    password: bytes | None = None,
+    progress_callback: Callable[..., None] | None = None,
+    progress_lock: threading.Lock | None = None,
+    progress_state: dict[str, int] | None = None,
+) -> None:
+    try:
+        with archive_factory(archive_path) as archive:
+            if password and hasattr(archive, "setpassword"):
+                archive.setpassword(password)
+            with archive.open(entry.member_name) as source, entry.target_path.open("wb") as handle:
+                while True:
+                    chunk = source.read(ZIP_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    if progress_callback and progress_lock is not None and progress_state is not None:
+                        with progress_lock:
+                            progress_state["bytes_done"] += len(chunk)
+                            progress_callback(
+                                bytes_done=progress_state["bytes_done"],
+                                bytes_total=progress_state["bytes_total"],
+                            )
+    except Exception:
+        entry.target_path.unlink(missing_ok=True)
+        raise
+
+
+def _extract_single_zip_member(
+    archive_path: Path,
+    entry: ZipMemberTarget,
+    *,
+    password: bytes | None = None,
+    progress_callback: Callable[..., None] | None = None,
+    progress_lock: threading.Lock | None = None,
+    progress_state: dict[str, int] | None = None,
+) -> None:
+    zip_error: Exception | None = None
+    try:
+        _extract_zip_member_with_archive(
+            zipfile.ZipFile,
+            archive_path,
+            entry,
+            password=password,
+            progress_callback=progress_callback,
+            progress_lock=progress_lock,
+            progress_state=progress_state,
+        )
+        return
+    except (RuntimeError, NotImplementedError, zipfile.BadZipFile, KeyError) as exc:
+        zip_error = exc
+
+    try:
+        _extract_zip_member_with_archive(
+            pyzipper.AESZipFile,
+            archive_path,
+            entry,
+            password=password,
+            progress_callback=progress_callback,
+            progress_lock=progress_lock,
+            progress_state=progress_state,
+        )
+    except (RuntimeError, NotImplementedError, zipfile.BadZipFile, pyzipper.zipfile.BadZipFile, KeyError) as exc:
+        raise ArchiveError(str(exc)) from zip_error or exc
+
+
+def _extract_zip_archive(
+    archive_path: Path,
+    destination_dir: Path,
+    *,
+    password: str | None = None,
+    progress_callback: Callable[..., None] | None = None,
+) -> list[str]:
+    encoded_password = password.encode("utf-8") if password else None
+
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = _archive_members(archive)
+    except (RuntimeError, NotImplementedError, zipfile.BadZipFile):
+        try:
+            with pyzipper.AESZipFile(archive_path) as archive:
+                members = _archive_members(archive)
+        except (RuntimeError, NotImplementedError, zipfile.BadZipFile, pyzipper.zipfile.BadZipFile) as exc:
+            raise ArchiveError(str(exc)) from exc
+
+    directory_targets, file_targets, total_bytes = _prepare_archive_targets(members, destination_dir)
+    _ensure_target_directories(destination_dir, directory_targets, file_targets)
+
+    worker_count = min(zip_extraction_worker_count(), max(len(file_targets), 1))
+    if progress_callback:
+        thread_label = "thread" if worker_count == 1 else "threads"
+        progress_callback(message=f"Using {worker_count} ZIP extraction {thread_label}.")
+        progress_callback(bytes_done=0, bytes_total=total_bytes)
+
+    progress_lock = threading.Lock()
+    progress_state = {
+        "bytes_done": 0,
+        "bytes_total": total_bytes,
+    }
+
+    if worker_count == 1 or len(file_targets) <= 1:
+        for entry in file_targets:
+            _extract_single_zip_member(
+                archive_path,
+                entry,
+                password=encoded_password,
+                progress_callback=progress_callback,
+                progress_lock=progress_lock,
+                progress_state=progress_state,
+            )
+        return [str(entry.target_path) for entry in file_targets]
+
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="zip-extract") as executor:
+        futures = [
+            executor.submit(
+                _extract_single_zip_member,
+                archive_path,
+                entry,
+                password=encoded_password,
+                progress_callback=progress_callback,
+                progress_lock=progress_lock,
+                progress_state=progress_state,
+            )
+            for entry in file_targets
+        ]
+        for future in as_completed(futures):
+            future.result()
+
+    return [str(entry.target_path) for entry in file_targets]
 
 
 def _extract_with_reader(
@@ -344,30 +620,12 @@ def extract_archive(
         raise ArchiveError("Only zip, rar, and 7z archives are supported.")
 
     if archive_type == "zip":
-        encoded_password = password.encode("utf-8") if password else None
-
-        zip_error: Exception | None = None
-        try:
-            with zipfile.ZipFile(archive_path) as archive:
-                return _extract_with_reader(
-                    archive,
-                    destination_dir,
-                    password=encoded_password,
-                    progress_callback=progress_callback,
-                )
-        except (RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
-            zip_error = exc
-
-        try:
-            with pyzipper.AESZipFile(archive_path) as archive:
-                return _extract_with_reader(
-                    archive,
-                    destination_dir,
-                    password=encoded_password,
-                    progress_callback=progress_callback,
-                )
-        except (RuntimeError, NotImplementedError, zipfile.BadZipFile, pyzipper.zipfile.BadZipFile) as exc:
-            raise ArchiveError(str(exc)) from zip_error or exc
+        return _extract_zip_archive(
+            archive_path,
+            destination_dir,
+            password=password,
+            progress_callback=progress_callback,
+        )
 
     if archive_type == "7z":
         return _extract_7z_archive(

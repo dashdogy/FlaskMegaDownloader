@@ -33,11 +33,12 @@ RETRYABLE_MEDIA_JOB_STATUSES = {"failed", "canceled"}
 
 ARCHIVE_JOB_STATUSES = {
     "queued",
+    "probing",
     "extracting",
     "completed",
     "failed",
 }
-ACTIVE_ARCHIVE_JOB_STATUSES = {"extracting"}
+ACTIVE_ARCHIVE_JOB_STATUSES = {"probing", "extracting"}
 RETRYABLE_ARCHIVE_JOB_STATUSES = {"failed"}
 
 
@@ -155,6 +156,7 @@ class ArchiveJob:
     archive_type: str
     target_relative_path: str
     target_path: str
+    archive_password: str | None = None
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -175,6 +177,7 @@ class ArchiveJob:
 
     def to_dict(self) -> dict:
         payload = asdict(self)
+        payload.pop("archive_password", None)
         payload["transfer"] = self.transfer.to_dict()
         return payload
 
@@ -190,6 +193,7 @@ class ArchiveJob:
             archive_type=data["archive_type"],
             target_relative_path=data["target_relative_path"],
             target_path=data["target_path"],
+            archive_password=data.get("archive_password"),
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),
             updated_at=data.get("updated_at", utcnow_iso()),

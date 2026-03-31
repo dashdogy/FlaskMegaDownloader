@@ -7,14 +7,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
+import zipfile
 
 import archives
+import pyzipper
 from archives import (
     ArchiveError,
     archive_type_for_path,
+    detect_effective_cpu_count,
     default_archive_target_name,
     extract_archive,
     is_supported_archive_path,
+    zip_extraction_worker_count,
 )
 from explorer import list_directory
 
@@ -87,6 +91,52 @@ class SuccessfulSevenZipProcess:
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_detect_effective_cpu_count_uses_affinity_only_when_no_cgroup_limit(self) -> None:
+        with TemporaryDirectory(prefix="archive-cpu-affinity-") as temp_dir:
+            with (
+                patch.object(archives, "_affinity_cpu_count", return_value=6),
+                patch.object(archives.os, "cpu_count", return_value=16),
+            ):
+                detected = detect_effective_cpu_count(cgroup_root=Path(temp_dir))
+
+        self.assertEqual(detected, 6)
+
+    def test_detect_effective_cpu_count_uses_cgroup_v2_quota(self) -> None:
+        with TemporaryDirectory(prefix="archive-cpu-v2-") as temp_dir:
+            root = Path(temp_dir)
+            (root / "cpu.max").write_text("250000 100000\n", encoding="utf-8")
+            with patch.object(archives, "_affinity_cpu_count", return_value=8):
+                detected = detect_effective_cpu_count(cgroup_root=root)
+
+        self.assertEqual(detected, 3)
+
+    def test_detect_effective_cpu_count_uses_cgroup_v1_quota(self) -> None:
+        with TemporaryDirectory(prefix="archive-cpu-v1-") as temp_dir:
+            root = Path(temp_dir)
+            cpu_dir = root / "cpu"
+            cpu_dir.mkdir(parents=True, exist_ok=True)
+            (cpu_dir / "cpu.cfs_quota_us").write_text("550000\n", encoding="utf-8")
+            (cpu_dir / "cpu.cfs_period_us").write_text("100000\n", encoding="utf-8")
+            with patch.object(archives, "_affinity_cpu_count", return_value=8):
+                detected = detect_effective_cpu_count(cgroup_root=root)
+
+        self.assertEqual(detected, 6)
+
+    def test_detect_effective_cpu_count_falls_back_to_os_cpu_count(self) -> None:
+        with TemporaryDirectory(prefix="archive-cpu-fallback-") as temp_dir:
+            with (
+                patch.object(archives, "_affinity_cpu_count", return_value=None),
+                patch.object(archives.os, "cpu_count", return_value=12),
+            ):
+                detected = detect_effective_cpu_count(cgroup_root=Path(temp_dir))
+
+        self.assertEqual(detected, 12)
+
+    def test_zip_worker_count_uses_all_but_four_threads(self) -> None:
+        self.assertEqual(zip_extraction_worker_count(effective_cpu_count=4), 1)
+        self.assertEqual(zip_extraction_worker_count(effective_cpu_count=3), 1)
+        self.assertEqual(zip_extraction_worker_count(effective_cpu_count=8), 4)
+
     def test_archive_type_detection_supports_zip_rar_and_7z_entrypoints(self) -> None:
         self.assertEqual(archive_type_for_path(Path("sample.zip")), "zip")
         self.assertEqual(archive_type_for_path(Path("sample.rar")), "rar")
@@ -135,6 +185,65 @@ class ArchiveTests(unittest.TestCase):
             extracted_path = Path(extracted[0])
             self.assertTrue(extracted_path.exists())
             self.assertEqual(extracted_path.read_bytes(), b"rar-payload")
+
+    def test_extract_archive_supports_parallel_zip_with_progress(self) -> None:
+        progress_updates: list[dict] = []
+
+        def record_progress(**kwargs) -> None:
+            progress_updates.append(kwargs)
+
+        with TemporaryDirectory(prefix="archive-zip-parallel-") as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "sample.zip"
+            destination = root / "output"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("alpha.txt", b"a" * 1024)
+                archive.writestr("beta.txt", b"b" * 2048)
+                archive.writestr("nested/gamma.txt", b"c" * 4096)
+
+            with patch.object(archives, "zip_extraction_worker_count", return_value=6):
+                extracted = extract_archive(archive_path, destination, progress_callback=record_progress)
+
+            self.assertEqual(len(extracted), 3)
+            self.assertEqual((destination / "alpha.txt").read_bytes(), b"a" * 1024)
+            self.assertEqual((destination / "beta.txt").read_bytes(), b"b" * 2048)
+            self.assertEqual((destination / "nested" / "gamma.txt").read_bytes(), b"c" * 4096)
+            self.assertIn({"message": "Using 3 ZIP extraction threads."}, progress_updates)
+            self.assertEqual(progress_updates[-1]["bytes_done"], 7168)
+            self.assertEqual(progress_updates[-1]["bytes_total"], 7168)
+
+    def test_extract_archive_supports_parallel_aes_zip(self) -> None:
+        progress_updates: list[dict] = []
+
+        def record_progress(**kwargs) -> None:
+            progress_updates.append(kwargs)
+
+        with TemporaryDirectory(prefix="archive-zip-aes-") as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "sample-aes.zip"
+            destination = root / "output"
+            with pyzipper.AESZipFile(
+                archive_path,
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES,
+            ) as archive:
+                archive.setpassword(b"secret123")
+                archive.writestr("one.txt", b"one" * 256)
+                archive.writestr("two.txt", b"two" * 512)
+
+            with patch.object(archives, "zip_extraction_worker_count", return_value=6):
+                extracted = extract_archive(
+                    archive_path,
+                    destination,
+                    password="secret123",
+                    progress_callback=record_progress,
+                )
+
+            self.assertEqual(len(extracted), 2)
+            self.assertEqual((destination / "one.txt").read_bytes(), b"one" * 256)
+            self.assertEqual((destination / "two.txt").read_bytes(), b"two" * 512)
+            self.assertIn({"message": "Using 2 ZIP extraction threads."}, progress_updates)
 
     def test_extract_archive_rar_missing_backend_surfaces_hint(self) -> None:
         with TemporaryDirectory(prefix="archive-rar-fail-") as temp_dir:
@@ -241,6 +350,33 @@ class ArchiveTests(unittest.TestCase):
                     extract_archive(archive_path, destination, seven_zip_binary="7z")
 
         self.assertIn("7z extraction support is unavailable", str(raised.exception))
+
+    def test_extract_archive_zip_rejects_duplicate_normalized_targets(self) -> None:
+        with TemporaryDirectory(prefix="archive-zip-duplicate-") as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "sample.zip"
+            destination = root / "output"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("same.txt", b"one")
+                archive.writestr("folder/../same.txt", b"two")
+
+            with self.assertRaises(ArchiveError) as raised:
+                extract_archive(archive_path, destination)
+
+        self.assertIn("resolve to the same destination", str(raised.exception))
+
+    def test_extract_archive_zip_rejects_path_traversal(self) -> None:
+        with TemporaryDirectory(prefix="archive-zip-traversal-") as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "sample.zip"
+            destination = root / "output"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("../evil.txt", b"nope")
+
+            with self.assertRaises(ArchiveError) as raised:
+                extract_archive(archive_path, destination)
+
+        self.assertIn("would extract outside the destination", str(raised.exception))
 
     def test_extract_archive_7z_rejects_path_traversal(self) -> None:
         calls: list[list[str]] = []

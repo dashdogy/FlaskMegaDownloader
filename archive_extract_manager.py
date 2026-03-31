@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
-from archives import ArchiveError, extract_archive
+from archives import ArchiveError, extract_archive, probe_archive
 from models import ACTIVE_ARCHIVE_JOB_STATUSES, ARCHIVE_JOB_STATUSES, ArchiveJob, TransferStatus, utcnow_iso
 from storage import JsonStorage
 
@@ -90,6 +90,7 @@ class ArchiveExtractManager:
                     archive_type=prepared["archive_type"],
                     target_relative_path=prepared["target_relative_path"],
                     target_path=prepared["target_path"],
+                    archive_password=prepared.get("archive_password"),
                     transfer=TransferStatus(bytes_total=prepared.get("bytes_total")),
                 )
                 self._jobs[job.id] = job
@@ -194,22 +195,42 @@ class ArchiveExtractManager:
                     if not job or job.status != "queued":
                         continue
                     self._progress_samples[job_id] = (time.monotonic(), 0)
-                    job.status = "extracting"
+                    job.status = "probing"
                     job.error = None
                     job.transfer.started_at = utcnow_iso()
                     job.transfer.finished_at = None
                     job.transfer.bytes_done = 0
-                    job.transfer.percent = 0.0 if job.transfer.bytes_total else None
-                    job.append_output("Queued archive extraction started.")
+                    job.transfer.percent = None
+                    job.transfer.speed_bps = None
+                    job.transfer.eta_seconds = None
+                    job.append_output("Inspecting archive...")
                     job.touch()
                     self._persist_locked(force=True)
 
                 final_status = "completed"
                 final_error: str | None = None
                 try:
+                    probe = probe_archive(
+                        Path(job.archive_path),
+                        password=job.archive_password,
+                        seven_zip_binary=self.seven_zip_binary,
+                    )
+                    self._update_job(
+                        job.id,
+                        status="probing",
+                        bytes_total=probe.bytes_total,
+                        message="Archive inspection finished.",
+                    )
+                    self._update_job(
+                        job.id,
+                        status="extracting",
+                        bytes_done=0,
+                        message="Queued archive extraction started.",
+                    )
                     extract_archive(
                         Path(job.archive_path),
                         Path(job.target_path),
+                        password=job.archive_password,
                         seven_zip_binary=self.seven_zip_binary,
                         progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
                     )
@@ -288,6 +309,7 @@ class ArchiveExtractManager:
                 return
             job.status = status
             job.error = error
+            job.archive_password = None
             job.transfer.finished_at = utcnow_iso()
             if status == "completed":
                 if job.transfer.bytes_total is not None:

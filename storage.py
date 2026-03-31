@@ -99,6 +99,7 @@ class SQLiteStorage:
                     archive_type TEXT NOT NULL,
                     target_relative_path TEXT NOT NULL,
                     target_path TEXT NOT NULL,
+                    archive_password TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -125,6 +126,7 @@ class SQLiteStorage:
                 );
                 """
             )
+            self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (SCHEMA_VERSION,),
@@ -133,6 +135,13 @@ class SQLiteStorage:
 
         if not database_existed:
             self._migrate_legacy_json_if_needed()
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        existing_columns = {str(row["name"]) for row in rows}
+        if column in existing_columns:
+            return
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _migrate_legacy_json_if_needed(self) -> None:
         if not self.legacy_json_path or not self.legacy_json_path.exists():
@@ -403,6 +412,7 @@ class SQLiteStorage:
                 job.archive_type,
                 job.target_relative_path,
                 job.target_path,
+                job.archive_password,
                 job.status,
                 job.created_at,
                 job.updated_at,
@@ -417,8 +427,8 @@ class SQLiteStorage:
             INSERT INTO archive_jobs(
                 id, batch_id, root_key, archive_relative_path, archive_path,
                 archive_display_name, archive_type, target_relative_path, target_path,
-                status, created_at, updated_at, error, transfer_json, output_tail_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                archive_password, status, created_at, updated_at, error, transfer_json, output_tail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -512,6 +522,7 @@ class SQLiteStorage:
             "archive_type": row["archive_type"],
             "target_relative_path": row["target_relative_path"],
             "target_path": row["target_path"],
+            "archive_password": row["archive_password"],
             "status": row["status"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

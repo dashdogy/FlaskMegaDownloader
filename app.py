@@ -16,7 +16,6 @@ from archives import (
     archive_type_for_path,
     default_archive_target_name,
     is_supported_archive_path,
-    probe_archive,
 )
 from downloader import DownloadManager, ensure_destination_writable
 from explorer import (
@@ -282,16 +281,6 @@ def create_app() -> Flask:
                 target_relative = str(Path(relative_path).parent / default_archive_target_name(entry_path))
             target_dir = path_within_root(root, target_relative)
 
-            try:
-                probe = probe_archive(
-                    entry_path,
-                    password=password,
-                    seven_zip_binary=app.config["SEVEN_ZIP_BINARY"],
-                )
-            except ArchiveError as exc:
-                failures.append(f"{entry_path.name}: {exc}")
-                continue
-
             prepared_jobs.append(
                 {
                     "root_key": root_key,
@@ -301,7 +290,7 @@ def create_app() -> Flask:
                     "archive_type": archive_type,
                     "target_relative_path": relative_to_root(root, target_dir),
                     "target_path": str(target_dir),
-                    "bytes_total": probe.bytes_total,
+                    "archive_password": password,
                 }
             )
 
