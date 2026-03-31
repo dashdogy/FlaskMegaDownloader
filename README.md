@@ -42,6 +42,7 @@ Supported LXC guest OS versions:
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
 - RAR extraction with `rarfile` plus a local backend such as `unar`, `unrar`, or `7z`
 - 7Z extraction, including `.7z.001` split-volume entrypoints, through the local `7z` binary
+- Optional post-extract auto-sort that moves detected video files into saved move favorites named `Movies` or `TvShows`
 - Explorer-driven Blu-ray remux submission for BDMV folder backups only
 - Pause, resume, cancel, and retry job actions
 - Custom destination paths, including a saved favorites list for paths you reuse
@@ -54,6 +55,7 @@ Supported LXC guest OS versions:
 - `downloader.py`: queue manager plus MEGAcmd/fake adapters
 - `media_compiler.py`: Blu-ray scan, remux, and verification queue
 - `archives.py`: secure ZIP, RAR, and 7Z extraction helpers
+- `archive_auto_sort.py`: post-extract video classification and Movies/TvShows routing
 - `explorer.py`: safe file browser helpers
 - `process_utils.py`: shared subprocess shutdown helpers
 - `storage.py`: SQLite state storage plus one-time `jobs.json` migration
@@ -111,6 +113,8 @@ Custom absolute download paths are supported, and you can save reusable custom p
 The dashboard submit box also accepts public `filecrypt.cc/Container/...` URLs. The app resolves those to MEGA links inline before queueing. Protected Filecrypt pages and direct `.dlc` links are not supported by the local resolver.
 
 Runtime state now lives in `STATE_DB_FILE` as SQLite. On first boot after upgrading, the app imports the legacy `jobs.json` automatically if present, then renames it so the migration is not retried. A corrupt legacy JSON file is quarantined and the app starts with empty state instead of crashing.
+
+Archive extraction can optionally auto-sort extracted video files after completion. That flow uses the saved move favorites list, requires exactly one favorite labeled `Movies` and one labeled `TvShows`, and relies on the Python `guessit` package from `requirements.txt`. Only video files are moved automatically; other extracted files stay in the extraction folder.
 
 ## Real MEGA Integration
 

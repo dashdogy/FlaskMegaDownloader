@@ -427,6 +427,7 @@ button:disabled {
 }
 
 .status-pill.active,
+.status-pill.sorting,
 .status-pill.downloading,
 .status-pill.probing,
 .status-pill.extracting,
@@ -701,6 +702,20 @@ button:disabled {
 .explorer-field label {
     font-size: 0.9rem;
     font-weight: 600;
+}
+
+.explorer-field .checkbox-label {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 0;
+    color: var(--text);
+}
+
+.explorer-field .checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin: 0;
 }
 
 .explorer-field input,

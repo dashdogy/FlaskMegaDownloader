@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from queue import Empty, Queue
 
+from archive_auto_sort import ArchiveAutoSortError, build_sort_summary_message, sort_extracted_videos
 from archives import ArchiveCanceledError, ArchiveError, extract_archive, probe_archive
 from models import ACTIVE_ARCHIVE_JOB_STATUSES, ARCHIVE_JOB_STATUSES, ArchiveJob, RETRYABLE_ARCHIVE_JOB_STATUSES, TransferStatus, utcnow_iso
 from storage import JsonStorage
@@ -93,6 +94,9 @@ class ArchiveExtractManager:
                     target_relative_path=prepared["target_relative_path"],
                     target_path=prepared["target_path"],
                     archive_password=prepared.get("archive_password"),
+                    auto_sort_enabled=bool(prepared.get("auto_sort_enabled", False)),
+                    movies_target_path=prepared.get("movies_target_path"),
+                    tv_target_path=prepared.get("tv_target_path"),
                     transfer=TransferStatus(bytes_total=prepared.get("bytes_total")),
                 )
                 self._jobs[job.id] = job
@@ -279,7 +283,7 @@ class ArchiveExtractManager:
                         bytes_done=0,
                         message="Queued archive extraction started.",
                     )
-                    extract_archive(
+                    extracted_paths = extract_archive(
                         Path(job.archive_path),
                         Path(job.target_path),
                         password=job.archive_password,
@@ -287,8 +291,34 @@ class ArchiveExtractManager:
                         progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
                         cancel_requested=cancel_event.is_set,
                     )
+                    if cancel_event.is_set():
+                        raise ArchiveCanceledError("Archive extraction canceled.")
+                    if job.auto_sort_enabled:
+                        self._update_job(
+                            job.id,
+                            status="sorting",
+                            message="Sorting extracted videos...",
+                        )
+                        sort_summary = sort_extracted_videos(
+                            extracted_paths,
+                            movies_target_path=Path(job.movies_target_path or ""),
+                            tv_target_path=Path(job.tv_target_path or ""),
+                            cancel_requested=cancel_event.is_set,
+                        )
+                        self._update_job(
+                            job.id,
+                            status="sorting",
+                            sort_summary=sort_summary.to_dict(),
+                            message=build_sort_summary_message(sort_summary),
+                        )
                 except ArchiveCanceledError as exc:
                     final_status = "canceled"
+                    final_error = str(exc)
+                except ArchiveAutoSortError as exc:
+                    if cancel_event.is_set() and "canceled" in str(exc).lower():
+                        final_status = "canceled"
+                    else:
+                        final_status = "failed"
                     final_error = str(exc)
                 except Exception as exc:
                     final_status = "failed"
@@ -324,6 +354,8 @@ class ArchiveExtractManager:
                 transfer.speed_bps = kwargs["speed_bps"]
             if "eta_seconds" in kwargs:
                 transfer.eta_seconds = kwargs["eta_seconds"]
+            if "sort_summary" in kwargs and kwargs["sort_summary"] is not None:
+                job.sort_summary = dict(kwargs["sort_summary"])
             message = kwargs.get("message")
             if message:
                 job.append_output(str(message))

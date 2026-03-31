@@ -156,7 +156,7 @@
     const isStoppedStatus = (status) => status === "failed" || status === "canceled";
     const isPausedStatus = (status) => status === "paused";
     const isActiveStatus = (status) => status === "starting" || status === "probing" || status === "downloading" || status === "active";
-    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting";
+    const isArchiveActiveStatus = (status) => status === "probing" || status === "extracting" || status === "sorting";
     const isMediaActiveStatus = (status) => status === "scanning" || status === "compiling" || status === "verifying";
 
     const progressPercent = (transfer) => {
@@ -485,6 +485,14 @@
         const speedLabel = isStoppedStatus(job.status) ? "Stopped" : formatSpeed(job.transfer.speed_bps);
         const etaLabel = isStoppedStatus(job.status) ? "Stopped" : formatEta(job.transfer.eta_seconds);
         const visibleMessage = String(job.transfer.last_message || "") || "Waiting for worker output.";
+        const sortSummary = job.sort_summary || {};
+        const sortSummaryParts = [
+            sortSummary.moved_movies ? `${sortSummary.moved_movies} to Movies` : "",
+            sortSummary.moved_tv ? `${sortSummary.moved_tv} to TvShows` : "",
+            sortSummary.skipped_unclear ? `${sortSummary.skipped_unclear} unclear` : "",
+            sortSummary.skipped_conflict ? `${sortSummary.skipped_conflict} conflict` : "",
+            sortSummary.failed ? `${sortSummary.failed} failed` : "",
+        ].filter(Boolean);
         const actions = [
             job.can_cancel ? `
                 <form action="/archive-jobs/${encodeURIComponent(job.id)}/cancel" method="post">
@@ -506,6 +514,12 @@
                     <span>${escapeHtml(job.archive_type.toUpperCase())}</span>
                     <span>${escapeHtml(job.target_display || job.target_relative_path || job.target_path)}</span>
                 </div>
+                ${job.auto_sort_enabled ? `
+                    <div class="metric-row">
+                        <span>Auto-sort</span>
+                        <span>${escapeHtml(sortSummaryParts.join(" | ") || "Movies / TvShows favorites")}</span>
+                    </div>
+                ` : ""}
                 <div class="metric-row">
                     <span>${escapeHtml(formatBytes(job.transfer.bytes_done))}</span>
                     <span>${escapeHtml(job.transfer.bytes_total ? formatBytes(job.transfer.bytes_total) : "Total unknown")}</span>

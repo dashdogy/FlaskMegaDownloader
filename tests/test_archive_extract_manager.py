@@ -11,8 +11,9 @@ from unittest.mock import patch
 
 import app as app_module
 from archive_extract_manager import ArchiveExtractManager
+from archive_auto_sort import ArchiveSortSummary
 from archives import ArchiveCanceledError, ArchiveError, ArchiveProbe
-from models import utcnow_iso
+from models import MoveFavorite, utcnow_iso
 from storage import SQLiteStorage
 
 
@@ -65,7 +66,7 @@ class FakeArchiveExtractManager:
             "summary": {
                 "total_jobs": len(self.dashboard_jobs),
                 "queued_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "queued"),
-                "active_jobs": sum(1 for job in self.dashboard_jobs if job["status"] in {"probing", "extracting"}),
+                "active_jobs": sum(1 for job in self.dashboard_jobs if job["status"] in {"probing", "extracting", "sorting"}),
                 "completed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "completed"),
                 "failed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "failed"),
                 "canceled_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "canceled"),
@@ -217,6 +218,89 @@ class ArchiveExtractManagerTests(unittest.TestCase):
                 job = manager.cancel_job(jobs[0].id)
                 self.assertEqual(job.status, "canceled")
                 self.assertIn("Canceled before extraction started.", job.error or "")
+            finally:
+                manager.stop()
+                manager._worker.join(timeout=1.0)
+
+    def test_auto_sort_runs_after_extract_and_persists_summary(self) -> None:
+        with TemporaryDirectory(prefix="archive-manager-sort-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            storage = SQLiteStorage(root / "state.sqlite3")
+            manager = ArchiveExtractManager(storage, seven_zip_binary="7z-test")
+            archive_path = root / "sample.zip"
+            archive_path.write_bytes(b"zip")
+            target_path = root / "output"
+            extracted_video = target_path / "Show.Name.S01E02.mkv"
+            movies_target = root / "Movies"
+            tv_target = root / "TvShows"
+
+            observed: dict[str, object] = {}
+            sort_started = threading.Event()
+
+            def fake_probe(path: Path, *, password: str | None = None, seven_zip_binary: str = "7z") -> ArchiveProbe:
+                return ArchiveProbe(archive_type="zip", bytes_total=4096, entry_count=1)
+
+            def fake_extract(
+                path: Path,
+                destination: Path,
+                password: str | None = None,
+                *,
+                seven_zip_binary: str = "7z",
+                progress_callback=None,
+                cancel_requested=None,
+            ) -> list[str]:
+                destination.mkdir(parents=True, exist_ok=True)
+                extracted_video.write_bytes(b"episode")
+                if progress_callback:
+                    progress_callback(bytes_done=4096, bytes_total=4096)
+                return [str(extracted_video)]
+
+            def fake_sort(
+                extracted_paths,
+                *,
+                movies_target_path: Path,
+                tv_target_path: Path,
+                cancel_requested=None,
+            ) -> ArchiveSortSummary:
+                observed["sort_paths"] = list(extracted_paths)
+                observed["movies_target_path"] = movies_target_path
+                observed["tv_target_path"] = tv_target_path
+                sort_started.set()
+                return ArchiveSortSummary(moved_tv=1)
+
+            try:
+                with (
+                    patch("archive_extract_manager.probe_archive", side_effect=fake_probe),
+                    patch("archive_extract_manager.extract_archive", side_effect=fake_extract),
+                    patch("archive_extract_manager.sort_extracted_videos", side_effect=fake_sort),
+                ):
+                    jobs = manager.submit(
+                        [
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "sample.zip",
+                                "archive_path": str(archive_path),
+                                "archive_display_name": "sample.zip",
+                                "archive_type": "zip",
+                                "target_relative_path": "sample",
+                                "target_path": str(target_path),
+                                "auto_sort_enabled": True,
+                                "movies_target_path": str(movies_target),
+                                "tv_target_path": str(tv_target),
+                            }
+                        ]
+                    )
+                    job_id = jobs[0].id
+
+                    self.assertTrue(sort_started.wait(1.0))
+                    self.assertTrue(wait_for(lambda: manager._jobs[job_id].status == "completed"))
+
+                job = manager._jobs[job_id]
+                self.assertEqual(observed["sort_paths"], [str(extracted_video)])
+                self.assertEqual(observed["movies_target_path"], movies_target)
+                self.assertEqual(observed["tv_target_path"], tv_target)
+                self.assertEqual(job.sort_summary["moved_tv"], 1)
+                self.assertTrue(any("Auto-sort finished" in line for line in job.output_tail))
             finally:
                 manager.stop()
                 manager._worker.join(timeout=1.0)
@@ -381,6 +465,7 @@ class ArchiveExtractManagerTests(unittest.TestCase):
 
 class ArchiveRequestPathTests(unittest.TestCase):
     def setUp(self) -> None:
+        FakeArchiveExtractManager.instance = None
         FakeArchiveExtractManager.dashboard_jobs = []
         FakeArchiveExtractManager.canceled_job_ids = []
         FakeArchiveExtractManager.clear_results = {"removed": 0, "canceling": 0}
@@ -446,6 +531,139 @@ class ArchiveRequestPathTests(unittest.TestCase):
                 app.extensions["download_manager"]._worker.join(timeout=1.0)
                 app.extensions["media_compile_manager"]._worker.join(timeout=1.0)
 
+    def test_explorer_extract_queues_auto_sort_targets_from_named_move_favorites(self) -> None:
+        with TemporaryDirectory(prefix="archive-route-auto-sort-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            downloads_dir = root / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            (downloads_dir / "sample.zip").write_bytes(b"zip")
+            movies_dir = root / "Movies"
+            tv_dir = root / "TvShows"
+
+            config_path = root / "test_config.py"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        f"BASE = Path(r'{root}')",
+                        "SECRET_KEY = 'test-secret'",
+                        "DATA_DIR = BASE / 'data'",
+                        "JOB_STORAGE_FILE = DATA_DIR / 'jobs.json'",
+                        "STATE_DB_FILE = DATA_DIR / 'state.sqlite3'",
+                        "DOWNLOADER_BACKEND = 'fake'",
+                        "SEVEN_ZIP_BINARY = '7z'",
+                        "ALLOWED_DESTINATIONS = {",
+                        "    'downloads': {",
+                        "        'key': 'downloads',",
+                        "        'label': 'Downloads',",
+                        "        'path': BASE / 'downloads',",
+                        "    }",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict(os.environ, {"MEGA_DOWNLOADER_CONFIG": str(config_path)}, clear=False),
+                patch.object(app_module, "ArchiveExtractManager", FakeArchiveExtractManager),
+                patch.object(app_module, "guessit_available", return_value=(True, None)),
+            ):
+                app = app_module.create_app()
+                app.extensions["download_manager"].storage.save_move_favorites(
+                    [
+                        MoveFavorite(key="movies", label="Movies", path=str(movies_dir)),
+                        MoveFavorite(key="tv", label="TvShows", path=str(tv_dir)),
+                    ]
+                )
+                client = app.test_client()
+                response = client.post(
+                    "/explorer/extract",
+                    data={
+                        "root": "downloads",
+                        "current_path": "",
+                        "sort": "name",
+                        "selected_paths": "sample.zip",
+                        "auto_sort_extracted_videos": "1",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                manager = FakeArchiveExtractManager.instance
+                self.assertIsNotNone(manager)
+                prepared_job = manager.submitted[0][0]
+                self.assertTrue(prepared_job["auto_sort_enabled"])
+                self.assertEqual(prepared_job["movies_target_path"], str(movies_dir.resolve()))
+                self.assertEqual(prepared_job["tv_target_path"], str(tv_dir.resolve()))
+
+                app.extensions["download_manager"].stop()
+                app.extensions["media_compile_manager"].stop()
+                app.extensions["archive_extract_manager"].stop()
+                app.extensions["download_manager"]._worker.join(timeout=1.0)
+                app.extensions["media_compile_manager"]._worker.join(timeout=1.0)
+
+    def test_explorer_extract_rejects_auto_sort_when_named_favorites_are_missing(self) -> None:
+        with TemporaryDirectory(prefix="archive-route-auto-sort-missing-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            downloads_dir = root / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            (downloads_dir / "sample.zip").write_bytes(b"zip")
+
+            config_path = root / "test_config.py"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        f"BASE = Path(r'{root}')",
+                        "SECRET_KEY = 'test-secret'",
+                        "DATA_DIR = BASE / 'data'",
+                        "JOB_STORAGE_FILE = DATA_DIR / 'jobs.json'",
+                        "STATE_DB_FILE = DATA_DIR / 'state.sqlite3'",
+                        "DOWNLOADER_BACKEND = 'fake'",
+                        "SEVEN_ZIP_BINARY = '7z'",
+                        "ALLOWED_DESTINATIONS = {",
+                        "    'downloads': {",
+                        "        'key': 'downloads',",
+                        "        'label': 'Downloads',",
+                        "        'path': BASE / 'downloads',",
+                        "    }",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict(os.environ, {"MEGA_DOWNLOADER_CONFIG": str(config_path)}, clear=False),
+                patch.object(app_module, "ArchiveExtractManager", FakeArchiveExtractManager),
+                patch.object(app_module, "guessit_available", return_value=(True, None)),
+            ):
+                app = app_module.create_app()
+                client = app.test_client()
+                response = client.post(
+                    "/explorer/extract",
+                    data={
+                        "root": "downloads",
+                        "current_path": "",
+                        "sort": "name",
+                        "selected_paths": "sample.zip",
+                        "auto_sort_extracted_videos": "1",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                manager = FakeArchiveExtractManager.instance
+                self.assertTrue(manager is None or not manager.submitted)
+                with client.session_transaction() as session:
+                    messages = session.get("_flashes", [])
+                self.assertTrue(any("Movies" in message for _, message in messages))
+
+                app.extensions["download_manager"].stop()
+                app.extensions["media_compile_manager"].stop()
+                app.extensions["archive_extract_manager"].stop()
+                app.extensions["download_manager"]._worker.join(timeout=1.0)
+                app.extensions["media_compile_manager"]._worker.join(timeout=1.0)
+
     def test_explorer_page_renders_related_archive_status_section(self) -> None:
         with TemporaryDirectory(prefix="archive-explorer-status-", ignore_cleanup_errors=True) as temp_dir:
             root = Path(temp_dir)
@@ -464,8 +682,10 @@ class ArchiveRequestPathTests(unittest.TestCase):
                     "target_relative_path": "sample",
                     "target_path": str(downloads_dir / "sample"),
                     "target_display": "sample",
-                    "status": "extracting",
-                    "status_label": "Extracting",
+                    "status": "sorting",
+                    "status_label": "Sorting",
+                    "auto_sort_enabled": True,
+                    "sort_summary": {"moved_tv": 1, "moved_movies": 0},
                     "can_cancel": True,
                     "transfer": {
                         "bytes_done": 1024,

@@ -12,7 +12,7 @@ from models import ArchiveJob, FavoriteDestination, Job, MediaJob, MoveFavorite
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 def _utc_compact_timestamp() -> str:
@@ -100,6 +100,10 @@ class SQLiteStorage:
                     target_relative_path TEXT NOT NULL,
                     target_path TEXT NOT NULL,
                     archive_password TEXT,
+                    auto_sort_enabled INTEGER NOT NULL DEFAULT 0,
+                    movies_target_path TEXT,
+                    tv_target_path TEXT,
+                    sort_summary_json TEXT NOT NULL DEFAULT '{}',
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -127,6 +131,10 @@ class SQLiteStorage:
                 """
             )
             self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
+            self._ensure_column(connection, "archive_jobs", "auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "archive_jobs", "movies_target_path", "TEXT")
+            self._ensure_column(connection, "archive_jobs", "tv_target_path", "TEXT")
+            self._ensure_column(connection, "archive_jobs", "sort_summary_json", "TEXT NOT NULL DEFAULT '{}'")
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (SCHEMA_VERSION,),
@@ -413,6 +421,10 @@ class SQLiteStorage:
                 job.target_relative_path,
                 job.target_path,
                 job.archive_password,
+                int(job.auto_sort_enabled),
+                job.movies_target_path,
+                job.tv_target_path,
+                json.dumps(job.sort_summary),
                 job.status,
                 job.created_at,
                 job.updated_at,
@@ -427,8 +439,9 @@ class SQLiteStorage:
             INSERT INTO archive_jobs(
                 id, batch_id, root_key, archive_relative_path, archive_path,
                 archive_display_name, archive_type, target_relative_path, target_path,
-                archive_password, status, created_at, updated_at, error, transfer_json, output_tail_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                archive_password, auto_sort_enabled, movies_target_path, tv_target_path,
+                sort_summary_json, status, created_at, updated_at, error, transfer_json, output_tail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -523,6 +536,10 @@ class SQLiteStorage:
             "target_relative_path": row["target_relative_path"],
             "target_path": row["target_path"],
             "archive_password": row["archive_password"],
+            "auto_sort_enabled": bool(row["auto_sort_enabled"]),
+            "movies_target_path": row["movies_target_path"],
+            "tv_target_path": row["tv_target_path"],
+            "sort_summary": json.loads(row["sort_summary_json"] or "{}"),
             "status": row["status"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],

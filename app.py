@@ -11,6 +11,7 @@ from flask import Flask, flash, jsonify, redirect, render_template, request, url
 
 import config as default_config
 from archive_extract_manager import ArchiveExtractManager
+from archive_auto_sort import guessit_available
 from archives import (
     ArchiveError,
     archive_type_for_path,
@@ -33,7 +34,7 @@ from explorer import (
 )
 from filecrypt_resolver import FilecryptResolutionError, expand_submission_urls_with_metadata
 from media_compiler import MediaCompileManager, detect_bluray_source
-from models import MoveFavorite
+from models import ACTIVE_ARCHIVE_JOB_STATUSES, MoveFavorite
 from storage import JsonStorage
 
 
@@ -194,6 +195,29 @@ def create_app() -> Flask:
         favorites.sort(key=lambda item: (item.label.lower(), item.path.lower()))
         return [favorite.to_dict() for favorite in favorites]
 
+    def resolve_archive_auto_sort_targets() -> tuple[Path, Path]:
+        available, reason = guessit_available()
+        if not available:
+            raise ValueError(reason or "Archive auto-sort is unavailable.")
+
+        favorites = storage.load_move_favorites()
+
+        def favorite_for_label(label: str) -> Path:
+            matches = [favorite for favorite in favorites if favorite.label.casefold() == label.casefold()]
+            if not matches:
+                raise ValueError(
+                    f"Archive auto-sort requires exactly one saved move favorite named '{label}'."
+                )
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Archive auto-sort found multiple saved move favorites named '{label}'. Keep exactly one."
+                )
+            target_path = Path(matches[0].path).expanduser().resolve()
+            ensure_destination_writable(target_path)
+            return target_path
+
+        return favorite_for_label("Movies"), favorite_for_label("TvShows")
+
     def save_move_favorite(root_key: str, current_path: str, target_input: str) -> dict:
         _, _, target_dir = resolve_move_target(manager.destinations, root_key, current_path, target_input)
         ensure_destination_writable(target_dir)
@@ -257,7 +281,7 @@ def create_app() -> Flask:
         explorer_archive_summary = {
             "total_jobs": len(explorer_archive_jobs),
             "queued_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "queued"),
-            "active_jobs": sum(1 for job in explorer_archive_jobs if job["status"] in {"probing", "extracting"}),
+            "active_jobs": sum(1 for job in explorer_archive_jobs if job["status"] in ACTIVE_ARCHIVE_JOB_STATUSES),
             "completed_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "completed"),
             "failed_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "failed"),
             "canceled_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "canceled"),
@@ -281,6 +305,7 @@ def create_app() -> Flask:
         password: str | None = None,
         target_dir_name: str | None = None,
         skip_non_archive: bool,
+        auto_sort_enabled: bool = False,
     ) -> dict:
         root_info, _, resolved_entries = resolve_entries_in_directory(
             manager.destinations,
@@ -292,6 +317,11 @@ def create_app() -> Flask:
         prepared_jobs: list[dict] = []
         skipped: list[str] = []
         failures: list[str] = []
+        movies_target_path: Path | None = None
+        tv_target_path: Path | None = None
+
+        if auto_sort_enabled:
+            movies_target_path, tv_target_path = resolve_archive_auto_sort_targets()
 
         if target_dir_name:
             target_dir_name = validate_entry_name(target_dir_name)
@@ -320,6 +350,9 @@ def create_app() -> Flask:
                     "target_relative_path": relative_to_root(root, target_dir),
                     "target_path": str(target_dir),
                     "archive_password": password,
+                    "auto_sort_enabled": auto_sort_enabled,
+                    "movies_target_path": str(movies_target_path) if movies_target_path else None,
+                    "tv_target_path": str(tv_target_path) if tv_target_path else None,
                 }
             )
 
@@ -636,6 +669,7 @@ def create_app() -> Flask:
         sort_by = request.form.get("sort", "name")
         selected_paths = request.form.getlist("selected_paths")
         password = request.form.get("password") or None
+        auto_sort_enabled = request.form.get("auto_sort_extracted_videos") == "1"
 
         try:
             result = extract_archives_in_folder(
@@ -644,6 +678,7 @@ def create_app() -> Flask:
                 selected_paths,
                 password=password,
                 skip_non_archive=True,
+                auto_sort_enabled=auto_sort_enabled,
             )
         except (ValueError, FileNotFoundError, ArchiveError) as exc:
             flash(str(exc), "error")
@@ -668,6 +703,8 @@ def create_app() -> Flask:
             )
         if not result["queued"] and not result["skipped"] and not result["failures"]:
             flash("No archive extraction jobs were queued.", "error")
+        elif auto_sort_enabled and result["queued"]:
+            flash("Auto-sort will move extracted videos into the saved Movies or TvShows favorites after extraction finishes.", "success")
         return explorer_redirect(root_key, current_path, sort_by)
 
     @app.post("/explorer/move-favorites")

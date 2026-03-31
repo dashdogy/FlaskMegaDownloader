@@ -116,6 +116,15 @@
                         <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
                         <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
                     </div>
+                    <div class="explorer-field-grid">
+                        <div class="explorer-field explorer-field-wide">
+                            <label for="auto-sort-extracted-videos" class="checkbox-label">
+                                <input type="checkbox" id="auto-sort-extracted-videos" name="auto_sort_extracted_videos" value="1">
+                                Auto-sort extracted videos after extraction
+                            </label>
+                            <p class="explorer-field-help">Requires exactly one saved move favorite named <strong>Movies</strong> and one named <strong>TvShows</strong>. Video files only are moved automatically.</p>
+                        </div>
+                    </div>
                 </section>
 
                 <section class="explorer-tool-card">
