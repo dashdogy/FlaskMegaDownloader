@@ -8,11 +8,27 @@ import time
 import unittest
 from unittest.mock import patch
 
-from downloader import DownloadManager, parse_megacmd_du_summary, parse_megacmd_ls_summary
+from downloader import (
+    DownloadManager,
+    MegaDownloader,
+    decrypt_mega_file_attributes,
+    parse_megacmd_du_summary,
+    parse_megacmd_ls_summary,
+)
 from storage import JsonStorage
 
 
 class DownloaderMetadataParsingTests(unittest.TestCase):
+    def test_decrypt_mega_file_attributes_for_sample_link(self) -> None:
+        attrs = decrypt_mega_file_attributes(
+            "g7_uy-xGi7yILSMvk794ZAVyLlPB8gmm0hwS--I_s6iEyxkXg9lLWbKWMp16XHachnNIKX1ZfsXCBa6aKi_35lIF4UbMyuZV-FWjK-07eC8",
+            "PpbchjFhtgSs8m6PHkPgEQD8n4pmfpdAggnEkGbP8Is",
+        )
+        self.assertEqual(
+            attrs["n"],
+            "La La Land (2016) (2160p BluRay x265 10bit HDR Tigole).mkv",
+        )
+
     def test_parse_megacmd_ls_ignores_separator_and_keeps_single_file(self) -> None:
         output = "\n".join(
             [
@@ -38,6 +54,37 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
             parse_megacmd_du_summary(output),
             (237266063, "[AnimeOnlineNinja] Shingeki OVA 01.mp4"),
         )
+
+    def test_public_file_api_fallback_resolves_sample_link_metadata(self) -> None:
+        class FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return self._body
+
+        downloader = MegaDownloader("mega-get")
+        with patch(
+            "downloader.urllib.request.urlopen",
+            return_value=FakeResponse(
+                '[{"s":11247304733,"at":"g7_uy-xGi7yILSMvk794ZAVyLlPB8gmm0hwS--I_s6iEyxkXg9lLWbKWMp16XHachnNIKX1ZfsXCBa6aKi_35lIF4UbMyuZV-FWjK-07eC8"}]'
+            ),
+        ):
+            metadata = downloader.probe_metadata(
+                "https://mega.nz/file/2uBxxD6B#PpbchjFhtgSs8m6PHkPgEQD8n4pmfpdAggnEkGbP8Is",
+                "sample-link",
+            )
+        self.assertEqual(
+            metadata["display_name"],
+            "La La Land (2016) (2160p BluRay x265 10bit HDR Tigole).mkv",
+        )
+        self.assertEqual(metadata["bytes_total"], 11247304733)
 
     def test_submit_prefers_filecrypt_metadata_overrides_for_names_and_sizes(self) -> None:
         temp_dir = mkdtemp(prefix="download-meta-")

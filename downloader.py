@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import hashlib
 import logging
 import math
@@ -19,8 +21,10 @@ import shlex
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Callable
 from urllib.parse import parse_qs, unquote, urlparse
+import urllib.request
 
 import pyzipper
+from Cryptodome.Cipher import AES
 
 from archive_auto_sort import guessit_available
 from archives import default_archive_target_name
@@ -195,6 +199,56 @@ def is_mega_url(url: str) -> bool:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     return host.endswith("mega.nz") or host.endswith("mega.co.nz")
+
+
+def parse_mega_public_file_link(url: str) -> tuple[str, str] | None:
+    parsed = urlparse(url)
+    if not is_mega_url(url):
+        return None
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if len(path_parts) >= 2 and path_parts[0].lower() == "file":
+        handle = path_parts[1].strip()
+        key = parsed.fragment.strip()
+        if handle and key:
+            return handle, key
+
+    combined = f"{parsed.path}#{parsed.fragment}"
+    legacy_match = re.search(r"!([^!#/]+)!([^!#/]+)", combined)
+    if legacy_match:
+        return legacy_match.group(1), legacy_match.group(2)
+    return None
+
+
+def is_mega_file_url(url: str) -> bool:
+    return parse_mega_public_file_link(url) is not None
+
+
+def mega_base64_url_decode(value: str) -> bytes:
+    normalized = value.replace("-", "+").replace("_", "/")
+    normalized += "=" * (-len(normalized) % 4)
+    return base64.b64decode(normalized)
+
+
+def mega_file_attribute_key(link_key: str) -> bytes:
+    raw_key = mega_base64_url_decode(link_key)
+    if len(raw_key) >= 32:
+        return bytes(left ^ right for left, right in zip(raw_key[:16], raw_key[16:32]))
+    if len(raw_key) == 16:
+        return raw_key
+    raise DownloadError("Unsupported MEGA file key length.")
+
+
+def decrypt_mega_file_attributes(attribute_blob: str, link_key: str) -> dict:
+    encrypted = mega_base64_url_decode(attribute_blob)
+    cipher = AES.new(mega_file_attribute_key(link_key), AES.MODE_CBC, iv=b"\x00" * 16)
+    plaintext = cipher.decrypt(encrypted).rstrip(b"\x00")
+    if not plaintext.startswith(b"MEGA"):
+        raise DownloadError("MEGA public file attributes could not be decrypted.")
+    try:
+        return json.loads(plaintext[4:].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DownloadError("MEGA public file attributes were not valid JSON.") from exc
 
 
 def parse_megacmd_ls_summary(output: str) -> list[dict]:
@@ -540,6 +594,64 @@ class MegaDownloader:
     def available(self) -> bool:
         return shutil.which(self.binary_name) is not None
 
+    def _probe_metadata_via_public_file_api(self, url: str, fallback_prefix: str) -> dict:
+        parsed_link = parse_mega_public_file_link(url)
+        if not parsed_link:
+            raise DownloadError("The URL is not a supported public MEGA file link.")
+
+        handle, link_key = parsed_link
+        request = urllib.request.Request(
+            "https://g.api.mega.co.nz/cs?id=0",
+            data=json.dumps([{"a": "g", "p": handle}]).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise DownloadError(f"MEGA public file API request failed: {exc}") from exc
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise DownloadError("MEGA public file API returned invalid JSON.") from exc
+
+        if not isinstance(payload, list) or not payload:
+            raise DownloadError("MEGA public file API returned an empty response.")
+        item = payload[0]
+        if isinstance(item, int):
+            raise DownloadError(f"MEGA public file API returned error code {item}.")
+        if not isinstance(item, dict):
+            raise DownloadError("MEGA public file API returned an unexpected payload.")
+
+        display_name = None
+        if item.get("at"):
+            attrs = decrypt_mega_file_attributes(str(item["at"]), link_key)
+            candidate = normalize_remote_display_name(attrs.get("n"))
+            if candidate:
+                display_name = candidate
+
+        bytes_total = None
+        if item.get("s") is not None:
+            try:
+                bytes_total = int(item["s"])
+            except (TypeError, ValueError):
+                bytes_total = None
+
+        return self._merge_metadata_from_outputs(
+            url,
+            fallback_prefix,
+            display_name=display_name,
+            bytes_total=bytes_total,
+        )
+
     def _run_metadata_command(
         self,
         companion_name: str,
@@ -654,6 +766,20 @@ class MegaDownloader:
         return metadata
 
     def probe_metadata(self, url: str, fallback_prefix: str) -> dict:
+        public_file_metadata: dict = {}
+        if is_mega_file_url(url):
+            try:
+                public_file_metadata = self._probe_metadata_via_public_file_api(url, fallback_prefix)
+            except DownloadError:
+                public_file_metadata = {}
+            else:
+                if (
+                    public_file_metadata.get("display_name")
+                    and not is_placeholder_display_name(public_file_metadata.get("display_name"))
+                    and public_file_metadata.get("bytes_total") is not None
+                ):
+                    return public_file_metadata
+
         ls_error: str | None = None
         du_error: str | None = None
 
@@ -680,6 +806,8 @@ class MegaDownloader:
             fallback_prefix,
             ls_output=ls_output if not ls_error else "",
             du_output=du_output,
+            display_name=public_file_metadata.get("display_name"),
+            bytes_total=public_file_metadata.get("bytes_total"),
         )
 
         needs_public_folder_fallback = is_mega_folder_url(url) and (
