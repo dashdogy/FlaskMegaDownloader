@@ -103,6 +103,11 @@ https://filecrypt.cc/Container/..."></textarea>
             <p class="eyebrow">Archive Extraction</p>
             <h2>Extraction jobs</h2>
         </div>
+        <div class="section-actions">
+            <form action="{{ url_for('clear_archive_queue') }}" method="post" class="inline-form">
+                <button type="submit" class="danger-button">Clear Extraction Queue</button>
+            </form>
+        </div>
     </div>
     <div id="archive-summary-grid" class="stat-grid"></div>
     <div id="archive-job-list" class="job-list media-job-list"></div>

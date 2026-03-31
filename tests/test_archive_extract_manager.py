@@ -12,6 +12,7 @@ from unittest.mock import patch
 import app as app_module
 from archive_extract_manager import ArchiveExtractManager
 from archives import ArchiveCanceledError, ArchiveError, ArchiveProbe
+from models import utcnow_iso
 from storage import SQLiteStorage
 
 
@@ -28,6 +29,8 @@ class FakeArchiveExtractManager:
     instance: "FakeArchiveExtractManager | None" = None
     dashboard_jobs: list[dict] = []
     canceled_job_ids: list[str] = []
+    clear_results: dict[str, int] = {"removed": 0, "canceling": 0}
+    clear_calls: int = 0
 
     def __init__(self, storage, *, seven_zip_binary: str = "7z"):
         self.storage = storage
@@ -41,6 +44,10 @@ class FakeArchiveExtractManager:
     def cancel_job(self, job_id: str):
         FakeArchiveExtractManager.canceled_job_ids.append(job_id)
         return SimpleNamespace(id=job_id)
+
+    def clear_queue(self) -> dict[str, int]:
+        FakeArchiveExtractManager.clear_calls += 1
+        return dict(FakeArchiveExtractManager.clear_results)
 
     def submit(self, prepared_jobs: list[dict]):
         self.submitted.append(prepared_jobs)
@@ -61,7 +68,7 @@ class FakeArchiveExtractManager:
                 "active_jobs": sum(1 for job in self.dashboard_jobs if job["status"] in {"probing", "extracting"}),
                 "completed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "completed"),
                 "failed_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "failed"),
-                "canceled_jobs": 0,
+                "canceled_jobs": sum(1 for job in self.dashboard_jobs if job["status"] == "canceled"),
                 "throughput_bps": 0.0,
                 "bytes_done": 0,
                 "bytes_total": 0,
@@ -192,6 +199,8 @@ class ArchiveExtractManagerTests(unittest.TestCase):
             archive_path.write_bytes(b"queued")
 
             try:
+                manager.stop()
+                manager._worker.join(timeout=1.0)
                 jobs = manager.submit(
                     [
                         {
@@ -278,11 +287,104 @@ class ArchiveExtractManagerTests(unittest.TestCase):
                 manager.stop()
                 manager._worker.join(timeout=1.0)
 
+    def test_clear_queue_removes_non_active_jobs_and_purges_canceled_active_job(self) -> None:
+        with TemporaryDirectory(prefix="archive-manager-clear-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            storage = SQLiteStorage(root / "state.sqlite3")
+            manager = ArchiveExtractManager(storage, seven_zip_binary="7z-test")
+            active_archive = root / "active.zip"
+            queued_archive = root / "queued.zip"
+            completed_archive = root / "completed.zip"
+            active_archive.write_bytes(b"active")
+            queued_archive.write_bytes(b"queued")
+            completed_archive.write_bytes(b"completed")
+
+            extraction_started = threading.Event()
+
+            def fake_probe(path: Path, *, password: str | None = None, seven_zip_binary: str = "7z") -> ArchiveProbe:
+                return ArchiveProbe(archive_type="zip", bytes_total=4096, entry_count=1)
+
+            def fake_extract(
+                path: Path,
+                destination: Path,
+                password: str | None = None,
+                *,
+                seven_zip_binary: str = "7z",
+                progress_callback=None,
+                cancel_requested=None,
+            ) -> list[str]:
+                extraction_started.set()
+                if progress_callback:
+                    progress_callback(bytes_done=1024, bytes_total=4096)
+                while cancel_requested and not cancel_requested():
+                    time.sleep(0.02)
+                raise ArchiveCanceledError("Archive extraction canceled.")
+
+            try:
+                with (
+                    patch("archive_extract_manager.probe_archive", side_effect=fake_probe),
+                    patch("archive_extract_manager.extract_archive", side_effect=fake_extract),
+                ):
+                    jobs = manager.submit(
+                        [
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "active.zip",
+                                "archive_path": str(active_archive),
+                                "archive_display_name": "active.zip",
+                                "archive_type": "zip",
+                                "target_relative_path": "active",
+                                "target_path": str(root / "active"),
+                            },
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "queued.zip",
+                                "archive_path": str(queued_archive),
+                                "archive_display_name": "queued.zip",
+                                "archive_type": "zip",
+                                "target_relative_path": "queued",
+                                "target_path": str(root / "queued"),
+                            },
+                            {
+                                "root_key": "downloads",
+                                "archive_relative_path": "completed.zip",
+                                "archive_path": str(completed_archive),
+                                "archive_display_name": "completed.zip",
+                                "archive_type": "zip",
+                                "target_relative_path": "completed",
+                                "target_path": str(root / "completed"),
+                            },
+                        ]
+                    )
+                    active_job_id = jobs[0].id
+                    queued_job_id = jobs[1].id
+                    completed_job_id = jobs[2].id
+
+                    self.assertTrue(extraction_started.wait(1.0))
+                    with manager._lock:
+                        manager._jobs[completed_job_id].status = "completed"
+                        manager._jobs[completed_job_id].transfer.finished_at = utcnow_iso()
+                        manager._rebuild_queue_locked()
+
+                    result = manager.clear_queue()
+
+                    self.assertEqual(result, {"removed": 2, "canceling": 1})
+                    self.assertNotIn(queued_job_id, manager._jobs)
+                    self.assertNotIn(completed_job_id, manager._jobs)
+                    self.assertIn(active_job_id, manager._jobs)
+                    self.assertIn(active_job_id, manager._purge_on_finish)
+                    self.assertTrue(wait_for(lambda: active_job_id not in manager._jobs))
+            finally:
+                manager.stop()
+                manager._worker.join(timeout=1.0)
+
 
 class ArchiveRequestPathTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeArchiveExtractManager.dashboard_jobs = []
         FakeArchiveExtractManager.canceled_job_ids = []
+        FakeArchiveExtractManager.clear_results = {"removed": 0, "canceling": 0}
+        FakeArchiveExtractManager.clear_calls = 0
 
     def test_unzip_route_queues_without_sync_probe(self) -> None:
         with TemporaryDirectory(prefix="archive-route-", ignore_cleanup_errors=True) as temp_dir:
@@ -413,6 +515,63 @@ class ArchiveRequestPathTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("Archive extraction status", body)
                 self.assertIn("sample.zip", body)
+
+                app.extensions["download_manager"].stop()
+                app.extensions["media_compile_manager"].stop()
+                app.extensions["archive_extract_manager"].stop()
+                app.extensions["download_manager"]._worker.join(timeout=1.0)
+                app.extensions["media_compile_manager"]._worker.join(timeout=1.0)
+
+    def test_clear_archive_queue_route_preserves_explorer_context(self) -> None:
+        with TemporaryDirectory(prefix="archive-clear-route-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            downloads_dir = root / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+
+            FakeArchiveExtractManager.clear_results = {"removed": 2, "canceling": 1}
+
+            config_path = root / "test_config.py"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "from pathlib import Path",
+                        f"BASE = Path(r'{root}')",
+                        "SECRET_KEY = 'test-secret'",
+                        "DATA_DIR = BASE / 'data'",
+                        "JOB_STORAGE_FILE = DATA_DIR / 'jobs.json'",
+                        "STATE_DB_FILE = DATA_DIR / 'state.sqlite3'",
+                        "DOWNLOADER_BACKEND = 'fake'",
+                        "SEVEN_ZIP_BINARY = '7z'",
+                        "ALLOWED_DESTINATIONS = {",
+                        "    'downloads': {",
+                        "        'key': 'downloads',",
+                        "        'label': 'Downloads',",
+                        "        'path': BASE / 'downloads',",
+                        "    }",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict(os.environ, {"MEGA_DOWNLOADER_CONFIG": str(config_path)}, clear=False),
+                patch.object(app_module, "ArchiveExtractManager", FakeArchiveExtractManager),
+            ):
+                app = app_module.create_app()
+                client = app.test_client()
+                response = client.post(
+                    "/archive-jobs/clear",
+                    data={
+                        "root": "downloads",
+                        "current_path": "subdir",
+                        "sort": "modified",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(FakeArchiveExtractManager.clear_calls, 1)
+                self.assertIn("/explorer?root=downloads&path=subdir&sort=modified", response.location)
 
                 app.extensions["download_manager"].stop()
                 app.extensions["media_compile_manager"].stop()

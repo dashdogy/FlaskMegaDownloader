@@ -482,6 +482,21 @@ def create_app() -> Flask:
             flash(str(exc), "error")
         return post_context_redirect("dashboard")
 
+    @app.post("/archive-jobs/clear")
+    def clear_archive_queue():
+        result = archive_manager.clear_queue()
+        messages: list[str] = []
+        if result["removed"]:
+            messages.append(f"Removed {result['removed']} archive job(s) from the queue.")
+        if result["canceling"]:
+            messages.append(
+                f"Canceling {result['canceling']} running archive job(s); they will disappear once cancellation finishes."
+            )
+        if not messages:
+            messages.append("Archive extraction queue was already empty.")
+        flash(" ".join(messages), "success")
+        return post_context_redirect("dashboard")
+
     @app.post("/jobs/<job_id>/pause")
     def pause_job(job_id: str):
         try:

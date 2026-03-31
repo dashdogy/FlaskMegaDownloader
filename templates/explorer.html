@@ -213,6 +213,14 @@
                         {{ explorer_archive_jobs|length }} related archive job(s) for this location.
                     </p>
                 </div>
+                <button
+                    type="submit"
+                    formaction="{{ url_for('clear_archive_queue') }}"
+                    formmethod="post"
+                    class="danger-button compact-button"
+                >
+                    Clear Extraction Queue
+                </button>
             </div>
             <div
                 id="explorer-archive-job-list"

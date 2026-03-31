@@ -27,6 +27,7 @@ class ArchiveExtractManager:
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._summary_throughput_sample: tuple[float, tuple[str, ...], int] | None = None
         self._cancel_events: dict[str, threading.Event] = {}
+        self._purge_on_finish: set[str] = set()
         self._jobs: dict[str, ArchiveJob] = {}
         self._last_persist = 0.0
         self._load_jobs()
@@ -116,15 +117,28 @@ class ArchiveExtractManager:
                 return job
             if job.status not in ACTIVE_ARCHIVE_JOB_STATUSES:
                 raise ValueError("Only queued or active archive jobs can be canceled.")
-
-            cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
-            if not cancel_event.is_set():
-                cancel_event.set()
-                job.error = "Cancel request sent."
-                job.append_output("Canceling archive extraction...")
-                job.touch()
-                self._persist_locked(force=True)
+            self._request_cancel_locked(job)
+            self._persist_locked(force=True)
             return job
+
+    def clear_queue(self) -> dict[str, int]:
+        with self._lock:
+            removed = 0
+            canceling = 0
+            for job in list(self._jobs.values()):
+                if job.status in ACTIVE_ARCHIVE_JOB_STATUSES:
+                    self._purge_on_finish.add(job.id)
+                    self._request_cancel_locked(job)
+                    canceling += 1
+                    continue
+                self._remove_job_locked(job.id)
+                removed += 1
+            self._rebuild_queue_locked()
+            self._persist_locked(force=True)
+            return {
+                "removed": removed,
+                "canceling": canceling,
+            }
 
     def dashboard_payload(self) -> dict:
         with self._lock:
@@ -367,6 +381,8 @@ class ArchiveExtractManager:
                 job.append_output(error or "Archive extraction failed.")
             job.transfer.speed_bps = None
             job.touch()
+            if job_id in self._purge_on_finish:
+                self._remove_job_locked(job_id)
             self._persist_locked(force=True)
 
     def _persist_locked(self, force: bool) -> None:
@@ -375,6 +391,21 @@ class ArchiveExtractManager:
             return
         self.storage.save_archive_jobs(self._jobs.values())
         self._last_persist = now
+
+    def _remove_job_locked(self, job_id: str) -> None:
+        self._jobs.pop(job_id, None)
+        self._cancel_events.pop(job_id, None)
+        self._progress_samples.pop(job_id, None)
+        self._purge_on_finish.discard(job_id)
+
+    def _request_cancel_locked(self, job: ArchiveJob) -> None:
+        cancel_event = self._cancel_events.setdefault(job.id, threading.Event())
+        if cancel_event.is_set():
+            return
+        cancel_event.set()
+        job.error = "Cancel request sent."
+        job.append_output("Canceling archive extraction...")
+        job.touch()
 
     def _require_job(self, job_id: str) -> ArchiveJob:
         if job_id not in self._jobs:
