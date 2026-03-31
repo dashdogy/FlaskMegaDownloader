@@ -17,6 +17,7 @@ JOB_STATUSES = {
 
 ACTIVE_JOB_STATUSES = {"starting", "probing", "downloading"}
 RETRYABLE_JOB_STATUSES = {"failed", "canceled"}
+DOWNLOAD_METADATA_STATUSES = {"pending", "resolving", "resolved", "deferred"}
 
 MEDIA_JOB_STATUSES = {
     "queued",
@@ -122,6 +123,9 @@ class Job:
     archive_auto_delete_enabled: bool = False
     archive_movies_target_path: str | None = None
     archive_tv_target_path: str | None = None
+    metadata_status: str = "resolved"
+    metadata_attempts: int = 0
+    metadata_message: str = ""
     status: str = "queued"
     created_at: str = field(default_factory=utcnow_iso)
     updated_at: str = field(default_factory=utcnow_iso)
@@ -161,6 +165,9 @@ class Job:
             archive_auto_delete_enabled=bool(data.get("archive_auto_delete_enabled", False)),
             archive_movies_target_path=data.get("archive_movies_target_path"),
             archive_tv_target_path=data.get("archive_tv_target_path"),
+            metadata_status=data.get("metadata_status", "resolved"),
+            metadata_attempts=int(data.get("metadata_attempts", 0) or 0),
+            metadata_message=data.get("metadata_message", ""),
             status=data.get("status", "queued"),
             created_at=data.get("created_at", utcnow_iso()),
             updated_at=data.get("updated_at", utcnow_iso()),

@@ -318,9 +318,10 @@
             ? `Transferring ${progressLabel}`
             : job.status_label;
         const lastMessage = String(job.transfer.last_message || "");
-        const visibleMessage = isTransferDebugMessage(lastMessage)
+        const metadataMessage = job.status === "queued" ? String(job.metadata_message || "") : "";
+        const visibleMessage = metadataMessage || (isTransferDebugMessage(lastMessage)
             ? ""
-            : (lastMessage || "Waiting for worker output.");
+            : (lastMessage || "Waiting for worker output."));
 
         const openDestination = job.explorer_root
             ? `<a class="ghost-button" href="/explorer?root=${encodeURIComponent(job.explorer_root)}&path=${encodeURIComponent(job.explorer_path || "")}">Open Destination</a>`

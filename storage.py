@@ -21,7 +21,7 @@ from models import (
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 
 def _utc_compact_timestamp() -> str:
@@ -68,6 +68,9 @@ class SQLiteStorage:
                     archive_auto_delete_enabled INTEGER NOT NULL DEFAULT 0,
                     archive_movies_target_path TEXT,
                     archive_tv_target_path TEXT,
+                    metadata_status TEXT,
+                    metadata_attempts INTEGER NOT NULL DEFAULT 0,
+                    metadata_message TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -192,6 +195,9 @@ class SQLiteStorage:
             self._ensure_column(connection, "download_jobs", "archive_auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "download_jobs", "archive_movies_target_path", "TEXT")
             self._ensure_column(connection, "download_jobs", "archive_tv_target_path", "TEXT")
+            self._ensure_column(connection, "download_jobs", "metadata_status", "TEXT")
+            self._ensure_column(connection, "download_jobs", "metadata_attempts", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "download_jobs", "metadata_message", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
             self._ensure_column(connection, "archive_jobs", "auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "archive_jobs", "auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
@@ -554,6 +560,9 @@ class SQLiteStorage:
                 int(job.archive_auto_delete_enabled),
                 job.archive_movies_target_path,
                 job.archive_tv_target_path,
+                job.metadata_status,
+                int(job.metadata_attempts),
+                job.metadata_message,
                 job.status,
                 job.created_at,
                 job.updated_at,
@@ -569,8 +578,9 @@ class SQLiteStorage:
                 id, batch_id, url, destination_key, destination_path, display_name,
                 destination_relative_path, destination_is_custom, auto_extract_enabled,
                 archive_auto_sort_enabled, archive_auto_delete_enabled, archive_movies_target_path,
-                archive_tv_target_path, status, created_at, updated_at, error, transfer_json, output_tail_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                archive_tv_target_path, metadata_status, metadata_attempts, metadata_message,
+                status, created_at, updated_at, error, transfer_json, output_tail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -756,6 +766,9 @@ class SQLiteStorage:
             archive_auto_delete_enabled=bool(row["archive_auto_delete_enabled"]),
             archive_movies_target_path=row["archive_movies_target_path"],
             archive_tv_target_path=row["archive_tv_target_path"],
+            metadata_status=row["metadata_status"] or "resolved",
+            metadata_attempts=int(row["metadata_attempts"] or 0),
+            metadata_message=row["metadata_message"] or "",
             status=row["status"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
