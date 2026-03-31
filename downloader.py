@@ -45,6 +45,7 @@ ProcessCallback = Callable[[subprocess.Popen | None], None]
 LOGGER = logging.getLogger(__name__)
 MAX_METADATA_PROBE_ATTEMPTS = 3
 METADATA_RETRY_DELAYS_SECONDS = (0.75, 1.5, 2.5)
+DIRECT_MEGA_METADATA_RETRY_DELAYS_SECONDS = (1.0, 2.0, 5.0)
 
 
 SIZE_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)(?:/s)?", re.IGNORECASE)
@@ -188,6 +189,12 @@ def is_mega_folder_url(url: str) -> bool:
     parsed = urlparse(url)
     combined = f"{parsed.path}#{parsed.fragment}".lower()
     return "/folder/" in combined or combined.startswith("#f!") or "/collection/" in combined
+
+
+def is_mega_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    return host.endswith("mega.nz") or host.endswith("mega.co.nz")
 
 
 def parse_megacmd_ls_summary(output: str) -> list[dict]:
@@ -987,6 +994,7 @@ class DownloadManager:
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int, float | None]] = {}
         self._metadata_enqueued: set[str] = set()
+        self._metadata_blocked_jobs: set[str] = set()
         self._summary_throughput_sample: tuple[float, tuple[str, ...], int] | None = None
         self._purge_on_finish: set[str] = set()
         self._last_persist = 0.0
@@ -1061,6 +1069,12 @@ class DownloadManager:
     def _job_needs_metadata_locked(self, job: Job) -> bool:
         return job_needs_metadata(job.display_name, job.transfer.bytes_total)
 
+    def _job_is_direct_mega_locked(self, job: Job) -> bool:
+        return is_mega_url(job.url)
+
+    def _job_blocks_queue_on_metadata_locked(self, job: Job) -> bool:
+        return job.status == "queued" and self._job_is_direct_mega_locked(job) and is_placeholder_display_name(job.display_name)
+
     def _schedule_metadata_resolution_locked(self, job_id: str, *, delay: float = 0.0) -> None:
         if self._stop_event.is_set() or job_id in self._metadata_enqueued:
             return
@@ -1069,7 +1083,30 @@ class DownloadManager:
 
     def _initialize_job_metadata_locked(self, job: Job, *, schedule: bool) -> None:
         if self._job_needs_metadata_locked(job):
-            if job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS:
+            if self._job_is_direct_mega_locked(job):
+                if job.status == "queued":
+                    job.metadata_status = "pending"
+                    job.metadata_message = metadata_status_message(
+                        job.display_name,
+                        job.transfer.bytes_total,
+                        deferred=False,
+                    )
+                    if schedule:
+                        self._schedule_metadata_resolution_locked(job.id)
+                        self._log(
+                            "debug",
+                            "metadata",
+                            "Queued background metadata resolution.",
+                            job=job,
+                            context={
+                                "missing_display_name": is_placeholder_display_name(job.display_name),
+                                "missing_bytes_total": job.transfer.bytes_total is None,
+                            },
+                        )
+                else:
+                    job.metadata_status = "pending"
+                    job.metadata_message = ""
+            elif job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS:
                 job.metadata_status = "deferred"
                 job.metadata_message = metadata_status_message(
                     job.display_name,
@@ -1102,7 +1139,13 @@ class DownloadManager:
             job.metadata_status = "resolved"
             job.metadata_message = ""
 
-    def _metadata_retry_delay(self, attempts: int) -> float:
+    def _metadata_retry_delay(self, job: Job) -> float:
+        attempts = max(job.metadata_attempts, 0)
+        if self._job_is_direct_mega_locked(job):
+            if attempts <= 0:
+                return 0.0
+            index = min(attempts - 1, len(DIRECT_MEGA_METADATA_RETRY_DELAYS_SECONDS) - 1)
+            return DIRECT_MEGA_METADATA_RETRY_DELAYS_SECONDS[index]
         if attempts <= 0:
             return 0.0
         index = min(attempts - 1, len(METADATA_RETRY_DELAYS_SECONDS) - 1)
@@ -1611,6 +1654,8 @@ class DownloadManager:
             with self._metadata_queue.mutex:
                 self._metadata_queue.queue.clear()
                 self._metadata_queue.not_empty.notify_all()
+            self._metadata_enqueued.clear()
+            self._metadata_blocked_jobs.clear()
             for process in list(self._active_processes.values()):
                 stop_process(process)
 
@@ -1918,6 +1963,7 @@ class DownloadManager:
             job.transfer.paused = True
             job.transfer.speed_bps = None
             job.transfer.eta_seconds = None
+            self._metadata_blocked_jobs.discard(job.id)
             if job.transfer.percent is None and job.transfer.bytes_total:
                 job.transfer.percent = clamp_percent((job.transfer.bytes_done / job.transfer.bytes_total) * 100.0)
             job.touch()
@@ -1983,15 +2029,19 @@ class DownloadManager:
         with self._lock:
             job = self._require_job(job_id)
             if job.status == "queued":
+                was_metadata_blocked = job.id in self._metadata_blocked_jobs
                 job.status = "canceled"
                 job.error = "Canceled before the download started."
                 job.transfer.finished_at = utcnow_iso()
+                self._metadata_blocked_jobs.discard(job.id)
                 job.touch()
                 self._rebuild_queue_locked()
                 if job.auto_extract_enabled:
                     self._sync_auto_extract_sets_locked({job.batch_id})
                 self._persist_locked(force=True)
                 self._log("info", "cancel", "Canceled queued download before start.", job=job)
+                if was_metadata_blocked:
+                    self._log("info", "metadata", "Canceled download while queue was blocked on filename resolution.", job=job)
                 return job
             if job.status == "paused" and not self._has_live_runtime_locked(job_id):
                 job.status = "canceled"
@@ -1999,6 +2049,7 @@ class DownloadManager:
                 job.transfer.paused = False
                 job.transfer.finished_at = utcnow_iso()
                 job.touch()
+                self._metadata_blocked_jobs.discard(job.id)
                 self._pause_events.pop(job_id, None)
                 self._rebuild_queue_locked()
                 if job.auto_extract_enabled:
@@ -2037,6 +2088,7 @@ class DownloadManager:
                 self._pause_events.pop(job_id, None)
                 self._active_processes.pop(job_id, None)
                 self._progress_samples.pop(job_id, None)
+                self._metadata_blocked_jobs.discard(job_id)
                 self._purge_on_finish.discard(job_id)
 
             self._rebuild_queue_locked()
@@ -2061,6 +2113,7 @@ class DownloadManager:
             self._cancel_events.pop(job_id, None)
             self._pause_events.pop(job_id, None)
             self._progress_samples.pop(job_id, None)
+            self._metadata_blocked_jobs.discard(job_id)
             self._purge_on_finish.discard(job_id)
             self._initialize_job_metadata_locked(job, schedule=True)
             self._rebuild_queue_locked()
@@ -2162,6 +2215,9 @@ class DownloadManager:
             self._sync_auto_extract_sets_locked()
             queued_job_ids = self._queued_job_ids_locked()
             queued_jobs = [self._jobs[job_id] for job_id in queued_job_ids if job_id in self._jobs]
+            blocked_metadata_job_id = None
+            if queued_jobs and self._job_blocks_queue_on_metadata_locked(queued_jobs[0]):
+                blocked_metadata_job_id = queued_jobs[0].id
             live_jobs = [job for job in self._jobs.values() if job.status in ACTIVE_JOB_STATUSES]
             summary_throughput_bps = self._summary_throughput_bps_locked(live_jobs)
             active_jobs = sorted(
@@ -2177,6 +2233,12 @@ class DownloadManager:
             jobs = active_jobs + queued_jobs + finished_jobs
             destination_lookup = {item["key"]: item["label"] for item in self.destination_options()}
             job_dicts = [self._job_payload(job, destination_lookup) for job in jobs]
+            if blocked_metadata_job_id:
+                for job_dict in job_dicts:
+                    job_dict["metadata_blocks_queue"] = job_dict["id"] == blocked_metadata_job_id
+            else:
+                for job_dict in job_dicts:
+                    job_dict["metadata_blocks_queue"] = False
             auto_extract_payloads = [
                 self._auto_extract_set_payload(item)
                 for item in sorted(self._auto_extract_sets.values(), key=lambda current: (current.created_at, current.id))
@@ -2335,6 +2397,7 @@ class DownloadManager:
         payload["metadata_status"] = job.metadata_status
         payload["metadata_attempts"] = job.metadata_attempts
         payload["metadata_message"] = job.metadata_message
+        payload["metadata_blocks_queue"] = False
         return payload
 
     def _metadata_worker_loop(self) -> None:
@@ -2359,10 +2422,11 @@ class DownloadManager:
                     continue
                 if job.status != "queued":
                     if job.metadata_status == "resolving":
-                        job.metadata_status = "deferred"
+                        job.metadata_status = "pending" if self._job_is_direct_mega_locked(job) else "deferred"
                         job.metadata_message = ""
                         job.touch()
                         self._persist_locked(force=False)
+                    self._metadata_blocked_jobs.discard(job.id)
                     self._log("debug", "metadata", "Skipped metadata resolution because the job left the queue.", job=job)
                     continue
                 if not self._job_needs_metadata_locked(job):
@@ -2371,6 +2435,7 @@ class DownloadManager:
                         job.metadata_message = ""
                         job.touch()
                         self._persist_locked(force=False)
+                    self._metadata_blocked_jobs.discard(job.id)
                     continue
 
                 job.metadata_attempts += 1
@@ -2437,7 +2502,7 @@ class DownloadManager:
                     )
                     continue
 
-                if job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS:
+                if not self._job_is_direct_mega_locked(job) and job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS:
                     job.metadata_status = "deferred"
                     job.metadata_message = metadata_status_message(
                         job.display_name,
@@ -2462,7 +2527,7 @@ class DownloadManager:
                     deferred=False,
                 )
                 job.touch()
-                delay = self._metadata_retry_delay(job.metadata_attempts)
+                delay = self._metadata_retry_delay(job)
                 self._schedule_metadata_resolution_locked(job.id, delay=delay)
                 self._persist_locked(force=False)
                 self._log(
@@ -2475,6 +2540,7 @@ class DownloadManager:
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
+            blocked_on_metadata = False
             try:
                 job_id = self._queue.get(timeout=0.25)
             except Empty:
@@ -2485,6 +2551,22 @@ class DownloadManager:
                     job = self._jobs.get(job_id)
                     if not job or job.status != "queued":
                         continue
+                    if self._job_blocks_queue_on_metadata_locked(job):
+                        with self._queue.mutex:
+                            self._queue.queue.appendleft(job_id)
+                            self._queue.not_empty.notify_all()
+                        if job.id not in self._metadata_blocked_jobs:
+                            self._metadata_blocked_jobs.add(job.id)
+                            self._log(
+                                "info",
+                                "metadata",
+                                "Queue blocked waiting for filename resolution.",
+                                job=job,
+                                context={"attempts": job.metadata_attempts},
+                            )
+                        blocked_on_metadata = True
+                        continue
+
                     cancel_event = self._cancel_events[job_id] = threading.Event()
                     pause_event = self._pause_events[job_id] = threading.Event()
                     self._progress_samples[job_id] = (time.monotonic(), 0, None)
@@ -2493,15 +2575,11 @@ class DownloadManager:
                     job.transfer.paused = False
                     job.transfer.started_at = utcnow_iso()
                     job.transfer.finished_at = None
-                    if self._job_needs_metadata_locked(job):
-                        job.metadata_status = "deferred"
-                        job.metadata_message = metadata_status_message(
-                            job.display_name,
-                            job.transfer.bytes_total,
-                            deferred=True,
-                        )
-                    else:
+                    if not self._job_needs_metadata_locked(job):
                         job.metadata_status = "resolved"
+                        job.metadata_message = ""
+                    else:
+                        job.metadata_status = "pending"
                         job.metadata_message = ""
                     job.touch()
                     destination_dir, _, _ = self.resolve_destination(
@@ -2543,6 +2621,8 @@ class DownloadManager:
                     self._pause_events.pop(job_id, None)
                     self._active_processes.pop(job_id, None)
                     self._progress_samples.pop(job_id, None)
+            if blocked_on_metadata and self._stop_event.wait(0.15):
+                break
 
     def _set_active_process(self, job_id: str, process: subprocess.Popen | None) -> None:
         with self._lock:
@@ -2616,12 +2696,23 @@ class DownloadManager:
                     job.metadata_status = "resolved"
                     job.metadata_message = ""
                     self._log("debug", "metadata", "Download metadata is now resolved.", job=job)
+                if job.id in self._metadata_blocked_jobs:
+                    self._metadata_blocked_jobs.discard(job.id)
+                    self._log("info", "metadata", "Filename resolved; download queue can continue.", job=job)
             elif job.status == "queued" and job.metadata_status == "deferred":
-                job.metadata_message = metadata_status_message(
-                    job.display_name,
-                    job.transfer.bytes_total,
-                    deferred=True,
-                )
+                if self._job_is_direct_mega_locked(job):
+                    job.metadata_status = "pending"
+                    job.metadata_message = metadata_status_message(
+                        job.display_name,
+                        job.transfer.bytes_total,
+                        deferred=False,
+                    )
+                else:
+                    job.metadata_message = metadata_status_message(
+                        job.display_name,
+                        job.transfer.bytes_total,
+                        deferred=True,
+                    )
             if job.auto_extract_enabled and display_name_changed:
                 self._sync_auto_extract_sets_locked({job.batch_id})
             if job.status == "queued" and (
@@ -2690,6 +2781,7 @@ class DownloadManager:
                 self._pause_events.pop(job_id, None)
                 self._active_processes.pop(job_id, None)
                 self._progress_samples.pop(job_id, None)
+                self._metadata_blocked_jobs.discard(job_id)
                 self._purge_on_finish.discard(job_id)
                 if batch_id:
                     self._sync_auto_extract_sets_locked({batch_id})
@@ -2709,6 +2801,7 @@ class DownloadManager:
             if not self._job_needs_metadata_locked(job):
                 job.metadata_status = "resolved"
                 job.metadata_message = ""
+            self._metadata_blocked_jobs.discard(job_id)
             job.touch()
             if job.auto_extract_enabled:
                 self._sync_auto_extract_sets_locked({job.batch_id})

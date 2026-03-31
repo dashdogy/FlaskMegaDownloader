@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import mkdtemp
 import shutil
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -115,7 +116,7 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_background_metadata_defers_after_three_attempts(self) -> None:
+    def test_direct_mega_metadata_keeps_retrying_without_deferred(self) -> None:
         temp_dir = mkdtemp(prefix="download-meta-")
         try:
             root = Path(temp_dir)
@@ -130,17 +131,18 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
             manager._rebuild_queue_locked = lambda ordered_ids=None: None
             manager.adapter.probe_metadata = lambda url, fallback_prefix: {}
 
-            with patch("downloader.METADATA_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0)):
+            with patch("downloader.DIRECT_MEGA_METADATA_RETRY_DELAYS_SECONDS", (0.0, 0.0, 0.0)):
                 jobs = manager.submit(["https://mega.nz/file/FILEONE#KEYONE"], "downloads")
                 deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline:
-                    if jobs[0].metadata_status == "deferred":
+                    if jobs[0].metadata_attempts >= 4:
                         break
                     time.sleep(0.05)
 
-            self.assertEqual(jobs[0].metadata_attempts, 3)
-            self.assertEqual(jobs[0].metadata_status, "deferred")
-            self.assertTrue(jobs[0].metadata_message.startswith("Waiting for download start"))
+            self.assertGreaterEqual(jobs[0].metadata_attempts, 4)
+            self.assertIn(jobs[0].metadata_status, {"pending", "resolving"})
+            self.assertNotEqual(jobs[0].metadata_status, "deferred")
+            self.assertTrue(jobs[0].metadata_message.startswith("Resolving file name"))
             manager.stop()
             manager._worker.join(timeout=1)
             manager._metadata_worker.join(timeout=1)
@@ -177,6 +179,153 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
             auto_extract_set = next(iter(manager._auto_extract_sets.values()))
             self.assertEqual(auto_extract_set.entrypoint_filename, "episode.zip")
             self.assertEqual(auto_extract_set.status, "waiting")
+            manager.stop()
+            manager._worker.join(timeout=1)
+            manager._metadata_worker.join(timeout=1)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_direct_mega_head_job_blocks_queue_until_filename_resolves(self) -> None:
+        temp_dir = mkdtemp(prefix="download-meta-")
+        try:
+            root = Path(temp_dir)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            storage = JsonStorage(root / "state.sqlite3", legacy_json_path=root / "jobs.json")
+            manager = DownloadManager(
+                storage=storage,
+                destinations={"downloads": {"label": "Downloads", "path": downloads}},
+                backend="fake",
+            )
+
+            release_probe = threading.Event()
+            download_started = threading.Event()
+
+            def gated_probe(url, fallback_prefix):
+                if "FILEONE" in url:
+                    release_probe.wait(timeout=2.0)
+                    return {"display_name": "Movie One.mkv"}
+                return {"display_name": "Movie Two.mkv"}
+
+            def fake_download(job, destination_dir, progress_callback, cancel_event, pause_event, process_callback):
+                download_started.set()
+                progress_callback(status="completed", display_name=job.display_name, message="done")
+
+            manager.adapter.probe_metadata = gated_probe
+            manager.adapter.download = fake_download
+            jobs = manager.submit(["https://mega.nz/file/FILEONE#KEYONE"], "downloads")
+
+            time.sleep(0.35)
+            self.assertEqual(jobs[0].status, "queued")
+            payload = manager.dashboard_payload()
+            job_payload = next(item for item in payload["jobs"] if item["id"] == jobs[0].id)
+            self.assertTrue(job_payload["metadata_blocks_queue"])
+            self.assertFalse(download_started.is_set())
+
+            release_probe.set()
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                if download_started.is_set():
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(download_started.is_set())
+            self.assertEqual(jobs[0].display_name, "Movie One.mkv")
+            manager.stop()
+            manager._worker.join(timeout=1)
+            manager._metadata_worker.join(timeout=1)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_later_jobs_do_not_leapfrog_blocked_direct_mega_head(self) -> None:
+        temp_dir = mkdtemp(prefix="download-meta-")
+        try:
+            root = Path(temp_dir)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            storage = JsonStorage(root / "state.sqlite3", legacy_json_path=root / "jobs.json")
+            manager = DownloadManager(
+                storage=storage,
+                destinations={"downloads": {"label": "Downloads", "path": downloads}},
+                backend="fake",
+            )
+
+            release_probe = threading.Event()
+            started_jobs: list[str] = []
+
+            def gated_probe(url, fallback_prefix):
+                if "FILEONE" in url:
+                    release_probe.wait(timeout=2.0)
+                    return {"display_name": "Head Movie.mkv"}
+                return {"display_name": "Tail Movie.mkv"}
+
+            def fake_download(job, destination_dir, progress_callback, cancel_event, pause_event, process_callback):
+                started_jobs.append(job.id)
+                progress_callback(status="completed", display_name=job.display_name, message="done")
+
+            manager.adapter.probe_metadata = gated_probe
+            manager.adapter.download = fake_download
+            jobs = manager.submit(
+                [
+                    "https://mega.nz/file/FILEONE#KEYONE",
+                    "https://mega.nz/file/FILETWO#KEYTWO",
+                ],
+                "downloads",
+                metadata_overrides={"https://mega.nz/file/FILETWO#KEYTWO": {"display_name": "Tail Movie.mkv"}},
+            )
+
+            time.sleep(0.35)
+            self.assertEqual(started_jobs, [])
+            self.assertEqual(jobs[0].status, "queued")
+            self.assertEqual(jobs[1].status, "queued")
+
+            release_probe.set()
+            deadline = time.monotonic() + 2.5
+            while time.monotonic() < deadline:
+                if started_jobs:
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(started_jobs)
+            self.assertEqual(started_jobs[0], jobs[0].id)
+            manager.stop()
+            manager._worker.join(timeout=1)
+            manager._metadata_worker.join(timeout=1)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_filename_resolution_allows_start_even_if_size_is_unknown(self) -> None:
+        temp_dir = mkdtemp(prefix="download-meta-")
+        try:
+            root = Path(temp_dir)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            storage = JsonStorage(root / "state.sqlite3", legacy_json_path=root / "jobs.json")
+            manager = DownloadManager(
+                storage=storage,
+                destinations={"downloads": {"label": "Downloads", "path": downloads}},
+                backend="fake",
+            )
+
+            started = threading.Event()
+
+            manager.adapter.probe_metadata = lambda url, fallback_prefix: {"display_name": "Known Name.mkv"}
+
+            def fake_download(job, destination_dir, progress_callback, cancel_event, pause_event, process_callback):
+                started.set()
+                progress_callback(status="completed", display_name=job.display_name, message="done")
+
+            manager.adapter.download = fake_download
+            jobs = manager.submit(["https://mega.nz/file/FILEONE#KEYONE"], "downloads")
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if started.is_set():
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(started.is_set())
+            self.assertEqual(jobs[0].display_name, "Known Name.mkv")
+            self.assertIsNone(jobs[0].transfer.bytes_total)
             manager.stop()
             manager._worker.join(timeout=1)
             manager._metadata_worker.join(timeout=1)

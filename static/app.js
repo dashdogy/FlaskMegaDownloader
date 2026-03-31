@@ -318,7 +318,11 @@
             ? `Transferring ${progressLabel}`
             : job.status_label;
         const lastMessage = String(job.transfer.last_message || "");
-        const metadataMessage = job.status === "queued" ? String(job.metadata_message || "") : "";
+        const metadataMessage = job.status === "queued"
+            ? (job.metadata_blocks_queue
+                ? "Waiting for filename before download starts"
+                : String(job.metadata_message || ""))
+            : "";
         const visibleMessage = metadataMessage || (isTransferDebugMessage(lastMessage)
             ? ""
             : (lastMessage || "Waiting for worker output."));
