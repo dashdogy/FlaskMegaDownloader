@@ -81,8 +81,8 @@ class DownloadAutoExtractTests(unittest.TestCase):
         self.assertEqual(len(self.archive_manager.submitted), 1)
         prepared = self.archive_manager.submitted[0][0]
         self.assertEqual(prepared["archive_display_name"], "sample.zip")
-        self.assertEqual(prepared["archive_path"], str(self.downloads_dir / "sample.zip"))
-        self.assertEqual(prepared["target_path"], str(self.downloads_dir / "sample"))
+        self.assertEqual(Path(prepared["archive_path"]), (self.downloads_dir / "sample.zip").resolve())
+        self.assertEqual(Path(prepared["target_path"]), (self.downloads_dir / "sample").resolve())
 
         auto_extract_set = next(iter(self.manager._auto_extract_sets.values()))
         self.assertEqual(auto_extract_set.status, "queued_for_extract")
@@ -116,7 +116,7 @@ class DownloadAutoExtractTests(unittest.TestCase):
         self.assertEqual(len(self.archive_manager.submitted), 1)
         prepared = self.archive_manager.submitted[0][0]
         self.assertEqual(prepared["archive_display_name"], "movie.part1.rar")
-        self.assertEqual(prepared["target_path"], str(self.downloads_dir / "movie"))
+        self.assertEqual(Path(prepared["target_path"]), (self.downloads_dir / "movie").resolve())
 
     def test_unresolved_archive_filename_is_grouped_only_after_resolution(self) -> None:
         self.manager.adapter.probe_metadata = lambda url, fallback_prefix: {}

@@ -21,11 +21,15 @@ from models import (
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = "6"
+SCHEMA_VERSION = "7"
 
 
 def _utc_compact_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+
+
+def _utc_iso_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class SQLiteStorage:
@@ -34,21 +38,38 @@ class SQLiteStorage:
         self.legacy_json_path = Path(legacy_json_path).expanduser().resolve() if legacy_json_path else None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._initializing_database = False
         self._startup_notices: list[dict] = []
         self._initialize_database()
 
     def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
+        if not self._initializing_database and not self._schema_available(connection):
+            connection.close()
+            self._initialize_database(migrate_legacy=False)
+            connection = sqlite3.connect(self.path, timeout=30)
+            connection.row_factory = sqlite3.Row
         return connection
 
-    def _initialize_database(self) -> None:
+    def _schema_available(self, connection: sqlite3.Connection) -> bool:
+        try:
+            connection.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return False
+        return True
+
+    def _initialize_database(self, *, migrate_legacy: bool = True) -> None:
         database_existed = self.path.exists()
-        with self._lock, self._connect() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.executescript(
-                """
+        with self._lock:
+            self._initializing_database = True
+            try:
+                with self._connect() as connection:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    connection.executescript(
+                        """
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -188,32 +209,43 @@ class SQLiteStorage:
                     batch_id TEXT,
                     context_json TEXT NOT NULL
                 );
-                """
-            )
-            self._ensure_column(connection, "download_jobs", "auto_extract_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "download_jobs", "archive_auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "download_jobs", "archive_auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "download_jobs", "archive_movies_target_path", "TEXT")
-            self._ensure_column(connection, "download_jobs", "archive_tv_target_path", "TEXT")
-            self._ensure_column(connection, "download_jobs", "metadata_status", "TEXT")
-            self._ensure_column(connection, "download_jobs", "metadata_attempts", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "download_jobs", "metadata_message", "TEXT NOT NULL DEFAULT ''")
-            self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
-            self._ensure_column(connection, "archive_jobs", "auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "archive_jobs", "auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "archive_jobs", "movies_target_path", "TEXT")
-            self._ensure_column(connection, "archive_jobs", "tv_target_path", "TEXT")
-            self._ensure_column(connection, "archive_jobs", "sort_summary_json", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column(connection, "archive_jobs", "auto_delete_summary_json", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column(connection, "auto_extract_sets", "movies_target_path", "TEXT")
-            self._ensure_column(connection, "auto_extract_sets", "tv_target_path", "TEXT")
-            connection.execute(
-                "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
-                (SCHEMA_VERSION,),
-            )
-            connection.commit()
 
-        if not database_existed:
+                CREATE TABLE IF NOT EXISTS worker_leases (
+                    lease_key TEXT PRIMARY KEY,
+                    worker_name TEXT NOT NULL,
+                    job_id TEXT,
+                    job_type TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT
+                );
+                """
+                    )
+                    self._ensure_column(connection, "download_jobs", "auto_extract_enabled", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "download_jobs", "archive_auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "download_jobs", "archive_auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "download_jobs", "archive_movies_target_path", "TEXT")
+                    self._ensure_column(connection, "download_jobs", "archive_tv_target_path", "TEXT")
+                    self._ensure_column(connection, "download_jobs", "metadata_status", "TEXT")
+                    self._ensure_column(connection, "download_jobs", "metadata_attempts", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "download_jobs", "metadata_message", "TEXT NOT NULL DEFAULT ''")
+                    self._ensure_column(connection, "archive_jobs", "archive_password", "TEXT")
+                    self._ensure_column(connection, "archive_jobs", "auto_sort_enabled", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "archive_jobs", "auto_delete_enabled", "INTEGER NOT NULL DEFAULT 0")
+                    self._ensure_column(connection, "archive_jobs", "movies_target_path", "TEXT")
+                    self._ensure_column(connection, "archive_jobs", "tv_target_path", "TEXT")
+                    self._ensure_column(connection, "archive_jobs", "sort_summary_json", "TEXT NOT NULL DEFAULT '{}'")
+                    self._ensure_column(connection, "archive_jobs", "auto_delete_summary_json", "TEXT NOT NULL DEFAULT '{}'")
+                    self._ensure_column(connection, "auto_extract_sets", "movies_target_path", "TEXT")
+                    self._ensure_column(connection, "auto_extract_sets", "tv_target_path", "TEXT")
+                    connection.execute(
+                        "INSERT OR REPLACE INTO metadata(key, value) VALUES('schema_version', ?)",
+                        (SCHEMA_VERSION,),
+                    )
+                    connection.commit()
+            finally:
+                self._initializing_database = False
+
+        if migrate_legacy and not database_existed:
             self._migrate_legacy_json_if_needed()
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -485,6 +517,32 @@ class SQLiteStorage:
             connection.commit()
         return entry
 
+    def upsert_worker_lease(
+        self,
+        *,
+        job_type: str,
+        worker_name: str,
+        job_id: str,
+        expires_at: str | None = None,
+    ) -> str:
+        lease_key = f"{job_type}:{worker_name}"
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO worker_leases(
+                    lease_key, worker_name, job_id, job_type, acquired_at, expires_at
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (lease_key, worker_name, job_id, job_type, _utc_iso_timestamp(), expires_at),
+            )
+            connection.commit()
+        return lease_key
+
+    def release_worker_lease(self, lease_key: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM worker_leases WHERE lease_key = ?", (lease_key,))
+            connection.commit()
+
     def save_state(
         self,
         jobs: Iterable[Job],
@@ -543,8 +601,24 @@ class SQLiteStorage:
             self._replace_archive_jobs(connection, archive_jobs)
             connection.commit()
 
+    def _delete_missing_rows(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        key_column: str,
+        keys: Iterable[str],
+    ) -> None:
+        key_values = tuple(str(key) for key in keys)
+        if not key_values:
+            connection.execute(f"DELETE FROM {table}")
+            return
+        placeholders = ", ".join("?" for _ in key_values)
+        connection.execute(
+            f"DELETE FROM {table} WHERE {key_column} NOT IN ({placeholders})",
+            key_values,
+        )
+
     def _replace_download_jobs(self, connection: sqlite3.Connection, jobs: Iterable[Job]) -> None:
-        connection.execute("DELETE FROM download_jobs")
         rows = [
             (
                 job.id,
@@ -572,9 +646,10 @@ class SQLiteStorage:
             )
             for job in jobs
         ]
+        self._delete_missing_rows(connection, "download_jobs", "id", (row[0] for row in rows))
         connection.executemany(
             """
-            INSERT INTO download_jobs(
+            INSERT OR REPLACE INTO download_jobs(
                 id, batch_id, url, destination_key, destination_path, display_name,
                 destination_relative_path, destination_is_custom, auto_extract_enabled,
                 archive_auto_sort_enabled, archive_auto_delete_enabled, archive_movies_target_path,
@@ -586,7 +661,6 @@ class SQLiteStorage:
         )
 
     def _replace_media_jobs(self, connection: sqlite3.Connection, media_jobs: Iterable[MediaJob]) -> None:
-        connection.execute("DELETE FROM media_jobs")
         rows = [
             (
                 job.id,
@@ -617,9 +691,10 @@ class SQLiteStorage:
             )
             for job in media_jobs
         ]
+        self._delete_missing_rows(connection, "media_jobs", "id", (row[0] for row in rows))
         connection.executemany(
             """
-            INSERT INTO media_jobs(
+            INSERT OR REPLACE INTO media_jobs(
                 id, batch_id, source_root_key, source_relative_path, source_path,
                 source_display_name, output_destination_key, output_destination_path,
                 output_destination_relative_path, output_destination_is_custom, output_file_path,
@@ -632,7 +707,6 @@ class SQLiteStorage:
         )
 
     def _replace_archive_jobs(self, connection: sqlite3.Connection, archive_jobs: Iterable[ArchiveJob]) -> None:
-        connection.execute("DELETE FROM archive_jobs")
         rows = [
             (
                 job.id,
@@ -660,9 +734,10 @@ class SQLiteStorage:
             )
             for job in archive_jobs
         ]
+        self._delete_missing_rows(connection, "archive_jobs", "id", (row[0] for row in rows))
         connection.executemany(
             """
-            INSERT INTO archive_jobs(
+            INSERT OR REPLACE INTO archive_jobs(
                 id, batch_id, root_key, archive_relative_path, archive_path,
                 archive_display_name, archive_type, target_relative_path, target_path,
                 archive_password, auto_sort_enabled, auto_delete_enabled, movies_target_path, tv_target_path,
@@ -673,32 +748,32 @@ class SQLiteStorage:
         )
 
     def _replace_favorites(self, connection: sqlite3.Connection, favorites: Iterable[FavoriteDestination]) -> None:
-        connection.execute("DELETE FROM favorite_destinations")
         rows = [
             (favorite.key, favorite.label, favorite.path, int(favorite.favorite))
             for favorite in favorites
         ]
+        self._delete_missing_rows(connection, "favorite_destinations", "key", (row[0] for row in rows))
         connection.executemany(
             """
-            INSERT INTO favorite_destinations(key, label, path, favorite)
+            INSERT OR REPLACE INTO favorite_destinations(key, label, path, favorite)
             VALUES(?, ?, ?, ?)
             """,
             rows,
         )
 
     def _replace_hidden_destinations(self, connection: sqlite3.Connection, hidden_base_destinations: Iterable[str]) -> None:
-        connection.execute("DELETE FROM hidden_base_destinations")
         rows = [(str(item),) for item in sorted({str(item) for item in hidden_base_destinations})]
+        self._delete_missing_rows(connection, "hidden_base_destinations", "key", (row[0] for row in rows))
         connection.executemany(
-            "INSERT INTO hidden_base_destinations(key) VALUES(?)",
+            "INSERT OR REPLACE INTO hidden_base_destinations(key) VALUES(?)",
             rows,
         )
 
     def _replace_move_favorites(self, connection: sqlite3.Connection, move_favorites: Iterable[MoveFavorite]) -> None:
-        connection.execute("DELETE FROM move_favorites")
         rows = [(favorite.key, favorite.label, favorite.path) for favorite in move_favorites]
+        self._delete_missing_rows(connection, "move_favorites", "key", (row[0] for row in rows))
         connection.executemany(
-            "INSERT INTO move_favorites(key, label, path) VALUES(?, ?, ?)",
+            "INSERT OR REPLACE INTO move_favorites(key, label, path) VALUES(?, ?, ?)",
             rows,
         )
 
@@ -707,7 +782,6 @@ class SQLiteStorage:
         connection: sqlite3.Connection,
         auto_extract_sets: Iterable[AutoExtractSet],
     ) -> None:
-        connection.execute("DELETE FROM auto_extract_sets")
         rows = [
             (
                 item.id,
@@ -738,9 +812,10 @@ class SQLiteStorage:
             )
             for item in auto_extract_sets
         ]
+        self._delete_missing_rows(connection, "auto_extract_sets", "id", (row[0] for row in rows))
         connection.executemany(
             """
-            INSERT INTO auto_extract_sets(
+            INSERT OR REPLACE INTO auto_extract_sets(
                 id, batch_id, destination_key, destination_path, destination_relative_path,
                 destination_is_custom, set_key, archive_type, multipart_style, archive_relative_path,
                 entrypoint_filename, expected_part_filenames_json, job_ids_json, archive_job_id,

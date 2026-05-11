@@ -4,21 +4,30 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ app_title }}</title>
+    {% if auth_enabled %}
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+    {% endif %}
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body data-poll-ms="{{ poll_interval_ms }}">
-    <div class="top-divider"></div>
-    <header class="site-shell site-header">
+<body data-poll-ms="{{ poll_interval_ms }}" class="{% if current_user_authenticated %}is-authenticated{% else %}is-login{% endif %}">
+    <header class="app-topbar">
         <div>
-            <p class="eyebrow">LAN Downloader</p>
+            <p class="eyebrow">LAN Operations</p>
             <h1>{{ app_title }}</h1>
-            <p class="subtle">Soft-card dashboard for queued MEGA downloads, Blu-ray remux jobs, and safe local extraction.</p>
         </div>
+        {% if current_user_authenticated %}
         <nav class="site-nav">
             <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
             <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer', 'explorer_move', 'explorer_compile_bluray', 'explorer_delete', 'explorer_extract', 'explorer_rename'] %}active{% endif %}">Explorer</a>
             <a href="{{ url_for('logs') }}" class="{% if request.endpoint in ['logs', 'api_logs'] %}active{% endif %}">Logs</a>
+            <a href="{{ url_for('roots') }}" class="{% if request.endpoint in ['roots', 'add_favorite', 'delete_destination', 'restore_destinations'] %}active{% endif %}">Roots</a>
+            {% if auth_enabled %}
+                <form action="{{ url_for('logout') }}" method="post" class="inline-form">
+                    <button type="submit" class="ghost-button">Sign Out</button>
+                </form>
+            {% endif %}
         </nav>
+        {% endif %}
     </header>
 
     <main class="site-shell page-stack">
@@ -35,6 +44,7 @@
         {% block content %}{% endblock %}
     </main>
 
+    <script src="{{ url_for('static', filename='security.js') }}" defer></script>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </body>
 </html>

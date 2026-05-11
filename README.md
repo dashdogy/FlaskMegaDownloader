@@ -17,6 +17,7 @@ The helper script is idempotent:
 - First run installs the app into `/opt/flask-mega-downloader`
 - Later runs update the managed checkout from GitHub, refresh the virtualenv, reinstall the systemd unit, and restart the service
 - `/etc/flask-mega-downloader/config.py` is created only once and then preserved across updates
+- If built-in auth is not configured yet, the helper generates `ADMIN_PASSWORD_HASH` and prints a one-time admin password
 - Existing helper-generated configs that still use the old default `PORT = 8080` are migrated to `8090` on rerun
 - MEGAcmd is installed from MEGA's official APT repo and the script prompts for `mega-login` if `www-data` is not already signed in
 - `mediainfo` is installed automatically and the helper makes a best-effort attempt to build and install MakeMKV CLI from the official MakeMKV download site
@@ -31,26 +32,29 @@ Supported LXC guest OS versions:
 
 ## Features
 
-- Server-rendered Flask app with a Homepage-inspired soft card UI
+- Server-rendered Flask/Jinja app with an operations-focused dashboard and no frontend build step
+- Built-in login sessions and CSRF protection for mutating routes
 - Multi-link submission with whitespace trimming, blank-line removal, and per-batch deduplication
 - Inline Filecrypt container resolution for public `filecrypt.cc` pages that redirect to MEGA
-- Background worker threads with SQLite-backed persisted state
+- Configurable background download, archive, and media worker pools with SQLite-backed persisted state
 - Real `mega-get` support via MEGAcmd, plus an explicit fake backend for development only
 - Separate Blu-ray remux queue using MakeMKV CLI plus MediaInfo verification
 - Polling JSON API for live status updates every 1500 ms
 - Dedicated Logs page with live SQLite-backed application event history
-- Safe file explorer rooted inside configured destinations only
+- Safe file explorer rooted inside saved destinations only
 - ZIP extraction with `zipfile` and AES/password support via `pyzipper`
 - RAR extraction with `rarfile` plus a local backend such as `unar`, `unrar`, or `7z`
 - 7Z extraction, including `.7z.001` split-volume entrypoints, through the local `7z` binary
 - Optional post-extract auto-sort that moves detected video files into saved move favorites named `Movies` or `TvShows`
 - Explorer-driven Blu-ray remux submission for BDMV folder backups only
 - Pause, resume, cancel, and retry job actions
-- Custom destination paths, including a saved favorites list for paths you reuse
+- Saved root management for reusable absolute destinations; per-action inputs use relative subfolders inside those roots
+- Automatic `setfacl` grants so the `plex` user can read and write new download, move, extract, auto-sort, and remux outputs
 
 ## Project Layout
 
-- `app.py`: app factory, routes, filters
+- `app.py`: compatibility shim that preserves the old import and `python app.py` entrypoint
+- `flask_mega_downloader/`: package app factory, runtime defaults, auth, and CSRF helpers
 - `server.py`: Waitress launcher that reads host/port from app config
 - `models.py`: dataclasses for jobs and explorer entries
 - `downloader.py`: queue manager plus MEGAcmd/fake adapters
@@ -78,9 +82,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-The default app binds to `0.0.0.0:8090`.
+The default app binds to `0.0.0.0:8090`. Built-in auth is enabled by default. For a local development config, either set `AUTH_ENABLED = False` or set `ADMIN_PASSWORD_HASH` to a Werkzeug password hash before logging in.
 
-The repo also includes [`install/proxmox-helper.sh`](/c:/Users/mkrbl/Documents/VSCODE/FlaskMegaDownloader/install/proxmox-helper.sh) for installing or updating the app inside an existing Proxmox LXC.
+The repo also includes [`install/proxmox-helper.sh`](install/proxmox-helper.sh) for installing or updating the app inside an existing Proxmox LXC.
 
 ## Configuration
 
@@ -97,10 +101,20 @@ Useful environment variables:
 
 - `MEGA_DOWNLOADER_CONFIG`: absolute path to an alternate config file
 - `MEGA_DOWNLOADER_BACKEND`: `auto`, `mega`, or `fake`
+- `MEGA_DOWNLOADER_AUTH_ENABLED`: `true`/`false` auth default for preserved configs missing `AUTH_ENABLED`
+- `MEGA_DOWNLOADER_ADMIN_USERNAME`: default admin username for preserved configs
+- `MEGA_DOWNLOADER_ADMIN_PASSWORD_HASH`: default password hash for preserved configs
 - `MEGACMD_BINARY`: override the `mega-get` executable name/path
 - `MAKEMKVCON_BINARY`: override the `makemkvcon` executable name/path
 - `MEDIAINFO_BINARY`: override the `mediainfo` executable name/path
 - `SEVEN_ZIP_BINARY`: override the `7z` executable name/path used for 7Z extraction
+- `MEGA_DOWNLOADER_DOWNLOAD_WORKERS`: concurrent download workers, clamped to 1-8
+- `MEGA_DOWNLOADER_ARCHIVE_WORKERS`: concurrent archive workers, clamped to 1-4
+- `MEGA_DOWNLOADER_MEDIA_WORKERS`: concurrent media remux workers, clamped to 1-2
+- `MEGA_DOWNLOADER_PLEX_PERMISSIONS_ENABLED`: enable or disable Plex ACL grants for completed outputs
+- `MEGA_DOWNLOADER_PLEX_PERMISSION_STRICT`: fail the job if Plex ACL grants cannot be applied
+- `MEGA_DOWNLOADER_PLEX_USER`: Plex account to grant output access to, default `plex`
+- `SETFACL_BINARY`: override the `setfacl` executable name/path
 - `MEGA_DOWNLOADER_BLURAY_MIN_TITLE_SECONDS`: minimum title length used when auto-selecting the main feature
 - `MEGA_DOWNLOADER_HOST`: HTTP bind host
 - `MEGA_DOWNLOADER_PORT`: HTTP bind port
@@ -111,8 +125,14 @@ Useful config keys:
 - `STATE_DB_FILE`: primary SQLite runtime state path
 - `JOB_STORAGE_FILE`: legacy JSON migration source for first boot after upgrade
 - `EVENT_LOG_MAX_ROWS`: maximum number of persisted application log lines kept in SQLite
+- `AUTH_ENABLED`, `ADMIN_USERNAME`, `ADMIN_PASSWORD_HASH`: built-in login controls
+- `DOWNLOAD_WORKERS`, `ARCHIVE_WORKERS`, `MEDIA_WORKERS`: conservative worker pool sizes
+- `MAX_CONTENT_LENGTH`, `MAX_URLS_PER_SUBMISSION`: request and submission limits
+- `PLEX_PERMISSIONS_ENABLED`, `PLEX_PERMISSION_STRICT`, `PLEX_USER`, `SETFACL_BINARY`: ACL grants for Plex visibility
 
-Custom absolute download paths are supported, and you can save reusable custom paths into the destination dropdown from the dashboard. The running app user must be able to create and write to that directory. In the packaged systemd setup, that user is `www-data`. If a custom path is not writable, the app shows a fix-up hint you can run on the host.
+Absolute paths are admin-managed saved roots. Downloads, archive extraction, moves, and Blu-ray remux outputs use a saved root plus a relative subfolder, so forms no longer accept arbitrary absolute paths for one-off actions. The running app user must be able to create and write to saved roots. In the packaged systemd setup, that user is `www-data`. If a root is not writable, the app shows a fix-up hint you can run on the host.
+
+When `PLEX_PERMISSIONS_ENABLED` is true, every completed output path is granted `u:plex:rw` for files and `u:plex:rwx` plus default directory ACLs for directories. The Proxmox helper installs the `acl` package and pre-applies those ACLs to `/srv/mega-downloads` and `/srv/media/incoming` when the `plex` user exists.
 
 The dashboard submit box also accepts public `filecrypt.cc/Container/...` URLs. The app resolves those to MEGA links inline before queueing. Protected Filecrypt pages and direct `.dlc` links are not supported by the local resolver.
 
@@ -161,7 +181,7 @@ v1 behavior:
 - Source type is BDMV-folder backups only
 - The app auto-selects the main feature by minimum duration, then longest duration, then largest size, then highest title id
 - Output is a lossless MKV remux with all tracks kept
-- Output goes to the selected configured destination or a custom absolute path
+- Output goes to a saved destination root plus an optional relative subfolder
 - Existing output files are not overwritten
 - Completed jobs are verified with MediaInfo, and the dashboard records Dolby Vision and Dolby Atmos when present
 
@@ -175,7 +195,7 @@ If either `makemkvcon` or `mediainfo` is missing, the dashboard and explorer sho
 
 ## systemd
 
-The included [`flask-mega-downloader.service`](/c:/Users/mkrbl/Documents/VSCODE/FlaskMegaDownloader/flask-mega-downloader.service) runs the app with Waitress as `www-data`, using:
+The included [`flask-mega-downloader.service`](flask-mega-downloader.service) runs the app with Waitress as `www-data`, using:
 
 - `WorkingDirectory=/opt/flask-mega-downloader`
 - `MEGA_DOWNLOADER_CONFIG=/etc/flask-mega-downloader/config.py`
@@ -194,6 +214,10 @@ mediainfo --Version
 
 ## Security Notes
 
+- Built-in auth is enabled by default. HTML routes require login except `/login`, `/logout`, and static assets.
+- POST routes require a CSRF token, supplied by rendered forms and by the shared `fetch` wrapper in `static/security.js`.
 - Explorer navigation is restricted with `Path.resolve()` checks under configured roots only.
+- Absolute destination paths are promoted into saved roots before use; routine actions only accept relative paths inside those roots.
+- Output permission grants use `setfacl` for the configured `PLEX_USER` instead of broad world-writable permissions.
 - Archive extraction validates every output path before writing to prevent path traversal and zip slip style issues, including staged 7Z extraction.
 - Download commands use argument lists, not shell expansion.

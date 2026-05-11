@@ -212,6 +212,9 @@ def resolve_move_target(
 
     if looks_like_absolute_path(cleaned):
         target_dir = resolve_absolute_input_path(cleaned)
+        allowed_roots = [Path(item["path"]).expanduser().resolve() for item in destinations.values()]
+        if not any(target_dir == allowed_root or allowed_root in target_dir.parents for allowed_root in allowed_roots):
+            raise ValueError("Move target must be inside a saved root. Add the path as a destination first.")
     else:
         target_dir = path_within_root(root, cleaned.replace("\\", "/"))
 
@@ -270,10 +273,13 @@ def move_entries(
     target_input: str,
     *,
     replace_existing: bool = False,
+    permission_manager=None,
 ) -> dict:
     preview = preview_move_entries(destinations, root_key, current_relative_path, relative_paths, target_input)
     target_dir: Path = preview["target_dir"]
     target_dir.mkdir(parents=True, exist_ok=True)
+    if permission_manager:
+        permission_manager.grant(target_dir, recursive=False, feature="explorer_move")
 
     moved: list[str] = []
     replaced: list[str] = []
@@ -291,6 +297,8 @@ def move_entries(
                 replaced_existing = True
 
             shutil.move(str(entry_path), str(target_path))
+            if permission_manager:
+                permission_manager.grant(target_path, recursive=True, feature="explorer_move")
             if replaced_existing:
                 replaced.append(entry_path.name)
             else:

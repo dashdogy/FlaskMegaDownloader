@@ -274,17 +274,25 @@ class MediaCompileManager:
         makemkvcon_binary: str,
         mediainfo_binary: str,
         bluray_min_title_seconds: int,
+        media_workers: int = 1,
+        permission_manager=None,
         event_logger=None,
     ):
         self.storage = storage
         self.event_logger = event_logger
+        self.permission_manager = permission_manager
         self.makemkvcon_binary = makemkvcon_binary
         self.mediainfo_binary = mediainfo_binary
         self.bluray_min_title_seconds = max(int(bluray_min_title_seconds), 1)
         self._lock = threading.RLock()
         self._queue: Queue[str] = Queue()
         self._stop_event = threading.Event()
-        self._worker = threading.Thread(target=self._worker_loop, name="media-compile-worker", daemon=True)
+        self.media_workers = max(1, min(int(media_workers or 1), 2))
+        self._workers = [
+            threading.Thread(target=self._worker_loop, name=f"media-compile-worker-{index + 1}", daemon=True)
+            for index in range(self.media_workers)
+        ]
+        self._worker = self._workers[0]
         self._cancel_events: dict[str, threading.Event] = {}
         self._active_processes: dict[str, subprocess.Popen] = {}
         self._progress_samples: dict[str, tuple[float, int]] = {}
@@ -295,7 +303,8 @@ class MediaCompileManager:
         self._mediainfo_path = resolve_binary(self.mediainfo_binary)
         self.backend_reason = self._build_backend_reason()
         self._load_jobs()
-        self._worker.start()
+        for worker in self._workers:
+            worker.start()
 
     def _log(self, level: str, feature: str, message: str, *, job: MediaJob | None = None, context: dict | None = None) -> None:
         if not self.event_logger:
@@ -334,6 +343,23 @@ class MediaCompileManager:
         with self._lock:
             for process in list(self._active_processes.values()):
                 stop_process(process)
+        current_thread = threading.current_thread()
+        for worker in getattr(self, "_workers", [self._worker]):
+            if worker is not current_thread:
+                worker.join(timeout=1.0)
+
+    def _grant_destination_permissions(self, output_path: Path, *, job: MediaJob) -> None:
+        if not self.permission_manager:
+            return
+        self.permission_manager.grant(output_path.parent, recursive=False, feature="bluray_remux")
+        granted = self.permission_manager.grant(output_path, recursive=True, feature="bluray_remux")
+        self._log(
+            "debug",
+            "permissions",
+            "Processed Plex ACL grants for Blu-ray remux output.",
+            job=job,
+            context={"path": str(output_path), "granted": granted},
+        )
 
     def _load_jobs(self) -> None:
         loaded_jobs = self.storage.load_media_jobs()
@@ -585,6 +611,7 @@ class MediaCompileManager:
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
+            lease_key: str | None = None
             try:
                 job_id = self._queue.get(timeout=0.25)
             except Empty:
@@ -616,6 +643,11 @@ class MediaCompileManager:
                     job.touch()
                     self._persist_locked(force=True)
                     self._log("info", "start", "Blu-ray worker started job.", job=job, context={"source_path": job.source_path})
+                    lease_key = self.storage.upsert_worker_lease(
+                        job_type="media",
+                        worker_name=threading.current_thread().name,
+                        job_id=job_id,
+                    )
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -642,6 +674,11 @@ class MediaCompileManager:
                     self._cancel_events.pop(job_id, None)
                     self._active_processes.pop(job_id, None)
                     self._progress_samples.pop(job_id, None)
+                if lease_key:
+                    try:
+                        self.storage.release_worker_lease(lease_key)
+                    except Exception:
+                        LOGGER.exception("Media worker could not release lease %s", lease_key)
 
     def _set_active_process(self, job_id: str, process: subprocess.Popen | None) -> None:
         with self._lock:
@@ -765,6 +802,7 @@ class MediaCompileManager:
 
         verification = parse_mediainfo_json(result.stdout)
         shutil.move(str(staged_output_file_path), str(final_output_file_path))
+        self._grant_destination_permissions(final_output_file_path, job=job)
         self._update_job(
             job_id,
             status="verifying",

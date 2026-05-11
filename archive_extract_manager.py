@@ -26,14 +26,28 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ArchiveExtractManager:
-    def __init__(self, storage: JsonStorage, *, seven_zip_binary: str = "7z", event_logger=None):
+    def __init__(
+        self,
+        storage: JsonStorage,
+        *,
+        seven_zip_binary: str = "7z",
+        archive_workers: int = 1,
+        permission_manager=None,
+        event_logger=None,
+    ):
         self.storage = storage
         self.event_logger = event_logger
+        self.permission_manager = permission_manager
         self.seven_zip_binary = seven_zip_binary
         self._lock = threading.RLock()
         self._queue: Queue[str] = Queue()
         self._stop_event = threading.Event()
-        self._worker = threading.Thread(target=self._worker_loop, name="archive-extract-worker", daemon=True)
+        self.archive_workers = max(1, min(int(archive_workers or 1), 4))
+        self._workers = [
+            threading.Thread(target=self._worker_loop, name=f"archive-extract-worker-{index + 1}", daemon=True)
+            for index in range(self.archive_workers)
+        ]
+        self._worker = self._workers[0]
         self._progress_samples: dict[str, tuple[float, int]] = {}
         self._summary_throughput_sample: tuple[float, tuple[str, ...], int] | None = None
         self._cancel_events: dict[str, threading.Event] = {}
@@ -41,7 +55,8 @@ class ArchiveExtractManager:
         self._jobs: dict[str, ArchiveJob] = {}
         self._last_persist = 0.0
         self._load_jobs()
-        self._worker.start()
+        for worker in self._workers:
+            worker.start()
 
     def _log(self, level: str, feature: str, message: str, *, job: ArchiveJob | None = None, context: dict | None = None) -> None:
         if not self.event_logger:
@@ -58,6 +73,24 @@ class ArchiveExtractManager:
 
     def stop(self) -> None:
         self._stop_event.set()
+        current_thread = threading.current_thread()
+        for worker in getattr(self, "_workers", [self._worker]):
+            if worker is not current_thread:
+                worker.join(timeout=1.0)
+
+    def _grant_destination_permissions(self, paths: list[str | Path], *, job: ArchiveJob, feature: str) -> None:
+        if not self.permission_manager:
+            return
+        candidates = [Path(path) for path in paths]
+        granted = self.permission_manager.grant_many(candidates, feature=feature)
+        if candidates:
+            self._log(
+                "debug",
+                "permissions",
+                "Processed Plex ACL grants for archive output.",
+                job=job,
+                context={"candidate_count": len(candidates), "granted_count": granted, "feature": feature},
+            )
 
     def _load_jobs(self) -> None:
         loaded_jobs = self.storage.load_archive_jobs()
@@ -292,6 +325,7 @@ class ArchiveExtractManager:
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
+            lease_key: str | None = None
             try:
                 job_id = self._queue.get(timeout=0.25)
             except Empty:
@@ -316,6 +350,11 @@ class ArchiveExtractManager:
                     job.touch()
                     self._persist_locked(force=True)
                     self._log("info", "probe", "Archive worker started probing archive.", job=job)
+                    lease_key = self.storage.upsert_worker_lease(
+                        job_type="archive",
+                        worker_name=threading.current_thread().name,
+                        job_id=job_id,
+                    )
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -355,6 +394,7 @@ class ArchiveExtractManager:
                         progress_callback=lambda **kwargs: self._update_job(job.id, **kwargs),
                         cancel_requested=cancel_event.is_set,
                     )
+                    self._grant_destination_permissions([job.target_path, *extracted_paths], job=job, feature="archive_extract")
                     if cancel_event.is_set():
                         raise ArchiveCanceledError("Archive extraction canceled.")
                     if job.auto_sort_enabled:
@@ -370,6 +410,11 @@ class ArchiveExtractManager:
                             tv_target_path=Path(job.tv_target_path or ""),
                             cancel_requested=cancel_event.is_set,
                         )
+                        moved_paths: list[Path] = []
+                        for item in sort_summary.moved_files:
+                            destination_path = Path(item.destination_path)
+                            moved_paths.extend([destination_path.parent, destination_path])
+                        self._grant_destination_permissions(moved_paths, job=job, feature="archive_auto_sort")
                         self._update_job(
                             job.id,
                             status="sorting",
@@ -452,6 +497,11 @@ class ArchiveExtractManager:
                 with self._lock:
                     self._progress_samples.pop(job_id, None)
                     self._cancel_events.pop(job_id, None)
+                if lease_key:
+                    try:
+                        self.storage.release_worker_lease(lease_key)
+                    except Exception:
+                        LOGGER.exception("Archive worker could not release lease %s", lease_key)
 
     def _update_job(self, job_id: str, **kwargs) -> None:
         with self._lock:

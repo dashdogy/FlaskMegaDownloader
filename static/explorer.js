@@ -291,9 +291,9 @@
         if (compileDestinationPreview && compileDestinationSelect) {
             const selectedOption = compileDestinationSelect.selectedOptions[0];
             const basePath = selectedOption?.dataset.path || "";
-            const customPath = compileDestinationInput?.value.trim();
-            if (customPath) {
-                compileDestinationPreview.textContent = `Base path: ${basePath}. Custom path: ${customPath}`;
+            const subPath = compileDestinationInput?.value.trim();
+            if (subPath) {
+                compileDestinationPreview.textContent = `Base path: ${basePath}. Subfolder: ${subPath}`;
             } else if (basePath) {
                 compileDestinationPreview.textContent = `Base path: ${basePath}`;
             } else {

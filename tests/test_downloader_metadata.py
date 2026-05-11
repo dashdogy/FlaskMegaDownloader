@@ -163,7 +163,7 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_direct_mega_metadata_keeps_retrying_without_deferred(self) -> None:
+    def test_direct_mega_metadata_falls_back_without_blocking_forever(self) -> None:
         temp_dir = mkdtemp(prefix="download-meta-")
         try:
             root = Path(temp_dir)
@@ -182,14 +182,14 @@ class DownloaderMetadataParsingTests(unittest.TestCase):
                 jobs = manager.submit(["https://mega.nz/file/FILEONE#KEYONE"], "downloads")
                 deadline = time.monotonic() + 2.0
                 while time.monotonic() < deadline:
-                    if jobs[0].metadata_attempts >= 4:
+                    if jobs[0].metadata_status == "resolved":
                         break
                     time.sleep(0.05)
 
-            self.assertGreaterEqual(jobs[0].metadata_attempts, 4)
-            self.assertIn(jobs[0].metadata_status, {"pending", "resolving"})
-            self.assertNotEqual(jobs[0].metadata_status, "deferred")
-            self.assertTrue(jobs[0].metadata_message.startswith("Resolving file name"))
+            self.assertEqual(jobs[0].metadata_attempts, 3)
+            self.assertEqual(jobs[0].metadata_status, "resolved")
+            self.assertEqual(jobs[0].display_name, f"download-{jobs[0].id[:8]}")
+            self.assertIn("fallback", jobs[0].metadata_message.lower())
             manager.stop()
             manager._worker.join(timeout=1)
             manager._metadata_worker.join(timeout=1)

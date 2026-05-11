@@ -327,7 +327,7 @@ def snapshot_relative_paths(root: Path) -> set[str]:
     return snapshot
 
 
-def cleanup_paths_created_since(root: Path, before_snapshot: set[str]) -> list[Path]:
+def paths_created_since(root: Path, before_snapshot: set[str]) -> list[Path]:
     if not root.exists():
         return []
 
@@ -336,6 +336,14 @@ def cleanup_paths_created_since(root: Path, before_snapshot: set[str]) -> list[P
         relative_path = relative_to_root(root, path)
         if relative_path and relative_path not in before_snapshot:
             created_paths.append(path)
+    return created_paths
+
+
+def cleanup_paths_created_since(root: Path, before_snapshot: set[str]) -> list[Path]:
+    if not root.exists():
+        return []
+
+    created_paths = paths_created_since(root, before_snapshot)
 
     removed_paths: list[Path] = []
     for path in sorted(created_paths, key=lambda item: len(item.parts), reverse=True):
@@ -1100,10 +1108,13 @@ class DownloadManager:
         destinations: dict,
         megacmd_binary: str = "mega-get",
         backend: str = "auto",
+        download_workers: int = 1,
+        permission_manager=None,
         event_logger=None,
     ):
         self.storage = storage
         self.event_logger = event_logger
+        self.permission_manager = permission_manager
         self.base_destinations = normalize_destinations(destinations)
         self.favorite_destinations: dict[str, dict] = {}
         self.hidden_base_destination_keys: set[str] = set()
@@ -1115,7 +1126,12 @@ class DownloadManager:
         self._queue: Queue[str] = Queue()
         self._metadata_queue: PriorityQueue[tuple[float, str]] = PriorityQueue()
         self._stop_event = threading.Event()
-        self._worker = threading.Thread(target=self._worker_loop, name="download-worker", daemon=True)
+        self.download_workers = max(1, min(int(download_workers or 1), 8))
+        self._workers = [
+            threading.Thread(target=self._worker_loop, name=f"download-worker-{index + 1}", daemon=True)
+            for index in range(self.download_workers)
+        ]
+        self._worker = self._workers[0]
         self._metadata_worker = threading.Thread(target=self._metadata_worker_loop, name="download-metadata-worker", daemon=True)
         self._cancel_events: dict[str, threading.Event] = {}
         self._pause_events: dict[str, threading.Event] = {}
@@ -1137,7 +1153,8 @@ class DownloadManager:
         self._load_archive_automation_settings()
         self._load_jobs()
         self._load_auto_extract_sets()
-        self._worker.start()
+        for worker in self._workers:
+            worker.start()
         self._metadata_worker.start()
 
     def _log(self, level: str, feature: str, message: str, *, job: Job | None = None, context: dict | None = None) -> None:
@@ -1281,6 +1298,7 @@ class DownloadManager:
 
     def _load_favorites(self) -> None:
         loaded_favorites = self.storage.load_favorites()
+        loaded_move_favorites = self.storage.load_move_favorites()
         with self._lock:
             for favorite in loaded_favorites:
                 resolved = Path(favorite.path).expanduser().resolve()
@@ -1290,6 +1308,22 @@ class DownloadManager:
                     "path": resolved,
                     "favorite": True,
                 }
+            existing_paths = {
+                Path(item["path"]).expanduser().resolve()
+                for item in [*self.base_destinations.values(), *self.favorite_destinations.values()]
+            }
+            for favorite in loaded_move_favorites:
+                resolved = Path(favorite.path).expanduser().resolve()
+                if resolved in existing_paths:
+                    continue
+                key = f"favorite_{hashlib.sha1(str(resolved).encode('utf-8')).hexdigest()[:10]}"
+                self.favorite_destinations[key] = {
+                    "key": key,
+                    "label": favorite.label,
+                    "path": resolved,
+                    "favorite": True,
+                }
+                existing_paths.add(resolved)
             self._refresh_destinations()
 
     def _load_hidden_base_destinations(self) -> None:
@@ -1786,6 +1820,30 @@ class DownloadManager:
             self._metadata_blocked_jobs.clear()
             for process in list(self._active_processes.values()):
                 stop_process(process)
+        current_thread = threading.current_thread()
+        for worker in getattr(self, "_workers", [self._worker]):
+            if worker is not current_thread:
+                worker.join(timeout=1.0)
+        if self._metadata_worker is not current_thread:
+            self._metadata_worker.join(timeout=1.0)
+
+    def _grant_destination_permissions(self, destination_dir: Path, created_paths: list[Path], *, job: Job) -> None:
+        if not self.permission_manager:
+            return
+        self.permission_manager.grant(destination_dir, recursive=False, feature="download")
+        candidates = list(created_paths)
+        display_candidate = destination_dir / job.display_name
+        if not candidates and display_candidate.exists():
+            candidates.append(display_candidate)
+        granted = self.permission_manager.grant_many(candidates, feature="download")
+        if candidates:
+            self._log(
+                "debug",
+                "permissions",
+                "Processed Plex ACL grants for downloaded output.",
+                job=job,
+                context={"candidate_count": len(candidates), "granted_count": granted},
+            )
 
     def has_destinations(self) -> bool:
         return bool(self.destinations)
@@ -1865,8 +1923,7 @@ class DownloadManager:
         root = self.get_destination_path(destination_key)
         normalized_subpath = normalize_user_path_input(destination_subpath)
         if looks_like_absolute_path(normalized_subpath):
-            resolved_path = resolve_absolute_input_path(normalized_subpath)
-            return resolved_path, "", True
+            raise ValueError("Use a saved root and a relative subfolder instead of an arbitrary absolute path.")
 
         normalized_subpath = normalized_subpath.replace("\\", "/")
         resolved_path = path_within_root(root, normalized_subpath)
@@ -1963,7 +2020,12 @@ class DownloadManager:
     def add_favorite_destination(self, destination_key: str, destination_input: str) -> dict:
         if not self.destinations:
             raise ValueError("No destinations are configured. Restore a destination before adding a favorite.")
-        destination_path, _, _ = self.resolve_destination(destination_key, destination_input)
+        cleaned_input = normalize_user_path_input(destination_input)
+        if looks_like_absolute_path(cleaned_input):
+            destination_path = resolve_absolute_input_path(cleaned_input)
+        else:
+            root = self.get_destination_path(destination_key)
+            destination_path = path_within_root(root, cleaned_input)
         ensure_destination_writable(destination_path)
 
         with self._lock:
@@ -2630,6 +2692,23 @@ class DownloadManager:
                     )
                     continue
 
+                if job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS and self._job_is_direct_mega_locked(job):
+                    if is_placeholder_display_name(job.display_name):
+                        job.display_name = f"download-{job.id[:8]}"
+                    job.metadata_status = "resolved"
+                    job.metadata_message = "Metadata unavailable; continuing with a fallback filename."
+                    self._metadata_blocked_jobs.discard(job.id)
+                    job.touch()
+                    self._persist_locked(force=True)
+                    self._log(
+                        "warning",
+                        "metadata",
+                        "Direct MEGA metadata could not be resolved; continuing with fallback details.",
+                        job=job,
+                        context={"attempts": job.metadata_attempts, "error": probe_error},
+                    )
+                    continue
+
                 if not self._job_is_direct_mega_locked(job) and job.metadata_attempts >= MAX_METADATA_PROBE_ATTEMPTS:
                     job.metadata_status = "deferred"
                     job.metadata_message = metadata_status_message(
@@ -2669,6 +2748,7 @@ class DownloadManager:
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
             blocked_on_metadata = False
+            lease_key: str | None = None
             try:
                 job_id = self._queue.get(timeout=0.25)
             except Empty:
@@ -2715,8 +2795,14 @@ class DownloadManager:
                         job.destination_path if job.destination_is_custom else job.destination_relative_path,
                     )
                     destination_dir.mkdir(parents=True, exist_ok=True)
+                    permission_snapshot = snapshot_relative_paths(destination_dir)
                     self._persist_locked(force=True)
                     self._log("info", "start", "Download worker started job.", job=job, context={"destination_path": str(destination_dir)})
+                    lease_key = self.storage.upsert_worker_lease(
+                        job_type="download",
+                        worker_name=threading.current_thread().name,
+                        job_id=job_id,
+                    )
 
                 final_status = "completed"
                 final_error: str | None = None
@@ -2736,6 +2822,11 @@ class DownloadManager:
                     final_status = "failed"
                     final_error = str(exc)
 
+                if final_status == "completed":
+                    with self._lock:
+                        finished_job = self._jobs.get(job.id, job)
+                    created_paths = paths_created_since(destination_dir, permission_snapshot)
+                    self._grant_destination_permissions(destination_dir, created_paths, job=finished_job)
                 self._finish_job(job.id, status=final_status, error=final_error)
             except Exception as exc:
                 LOGGER.exception("Download worker failed while handling job %s", job_id)
@@ -2749,6 +2840,11 @@ class DownloadManager:
                     self._pause_events.pop(job_id, None)
                     self._active_processes.pop(job_id, None)
                     self._progress_samples.pop(job_id, None)
+                if lease_key:
+                    try:
+                        self.storage.release_worker_lease(lease_key)
+                    except Exception:
+                        LOGGER.exception("Download worker could not release lease %s", lease_key)
             if blocked_on_metadata and self._stop_event.wait(0.15):
                 break
 

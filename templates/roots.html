@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="ops-grid roots-page">
+    <article class="panel">
+        <div class="section-heading">
+            <div>
+                <p class="eyebrow">Saved Roots</p>
+                <h2>Writable locations</h2>
+            </div>
+        </div>
+        <div class="destination-stack">
+            {% for destination in destinations %}
+                <div class="destination-pill">
+                    <a href="{{ url_for('explorer', root=destination.key) }}" class="destination-link">
+                        <span>{{ destination.label }}{% if destination.favorite %} (Saved){% endif %}</span>
+                        <small>{{ destination.path }}</small>
+                    </a>
+                    <form action="{{ url_for('delete_destination', destination_key=destination.key) }}" method="post" class="inline-form">
+                        <button type="submit" class="danger-button compact-button" {% if not destination.deletable %}disabled{% endif %}>Remove</button>
+                    </form>
+                </div>
+            {% else %}
+                <div class="empty-row">No roots are available.</div>
+            {% endfor %}
+        </div>
+        {% if can_restore_base_destinations %}
+            <form action="{{ url_for('restore_destinations') }}" method="post" class="inline-form restore-form">
+                <button type="submit" class="secondary-button">Restore Configured Roots</button>
+            </form>
+        {% endif %}
+    </article>
+
+    <article class="panel">
+        <p class="eyebrow">Add Root</p>
+        <h2>Promote an absolute path</h2>
+        <form action="{{ url_for('add_favorite') }}" method="post" class="submit-form">
+            <label for="destination">Base root</label>
+            <select id="destination" name="destination" {% if not has_destinations %}disabled{% endif %}>
+                {% for destination in destinations %}
+                    <option value="{{ destination.key }}">{{ destination.label }}</option>
+                {% endfor %}
+            </select>
+            <label for="destination_path">New root path</label>
+            <input id="destination_path" name="destination_path" type="text" placeholder="/mnt/media/incoming" autocomplete="off">
+            <p class="subtle form-hint">Absolute paths become saved roots. Relative paths are created under the selected root and saved for later reuse.</p>
+            <button type="submit" {% if not has_destinations %}disabled{% endif %}>Add Saved Root</button>
+        </form>
+    </article>
+</section>
+{% endblock %}
+

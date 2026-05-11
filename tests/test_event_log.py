@@ -62,6 +62,7 @@ class EventLogRouteTests(unittest.TestCase):
                     "from pathlib import Path",
                     f"BASE = Path(r'{root}')",
                     "SECRET_KEY = 'test-secret'",
+                    "AUTH_ENABLED = False",
                     "DATA_DIR = BASE / 'data'",
                     "JOB_STORAGE_FILE = DATA_DIR / 'jobs.json'",
                     "STATE_DB_FILE = DATA_DIR / 'state.sqlite3'",

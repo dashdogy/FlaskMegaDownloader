@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="login-shell">
+    <article class="login-panel">
+        <p class="eyebrow">Admin Access</p>
+        <h2>Sign in to manage downloads</h2>
+        {% if not password_configured %}
+            <div class="flash flash-error">
+                Admin credentials are not configured. Rerun the Proxmox helper or set ADMIN_PASSWORD_HASH in the app config.
+            </div>
+        {% endif %}
+        <form action="{{ url_for('login', next=request.args.get('next')) }}" method="post" class="login-form">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" value="admin" autocomplete="username" required>
+            <label for="password">Password</label>
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button type="submit" {% if not password_configured %}disabled{% endif %}>Sign In</button>
+        </form>
+    </article>
+</section>
+{% endblock %}
+
