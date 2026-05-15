@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PureWindowsPath
@@ -390,6 +391,16 @@ def _directory_has_children(path: Path) -> bool:
         return False
 
 
+def _entry_stat(path: Path):
+    try:
+        return path.stat()
+    except OSError:
+        try:
+            return path.lstat()
+        except OSError:
+            return None
+
+
 def list_directory_tree(
     destinations: dict[str, dict],
     root_key: str,
@@ -440,23 +451,27 @@ def list_directory(
 
     entries: list[ExplorerEntry] = []
     for child in current_path.iterdir():
-        stats = child.stat()
+        stats = _entry_stat(child)
+        if stats is None:
+            continue
+        is_symlink = child.is_symlink()
+        is_dir = stat.S_ISDIR(stats.st_mode) and not is_symlink
         modified_at = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).astimezone().isoformat()
-        archive_type = archive_type_for_path(child) if child.is_file() else None
-        entry_type = entry_type_for_path(child, archive_type=archive_type)
+        archive_type = archive_type_for_path(child) if not is_dir else None
+        entry_type = "symlink" if is_symlink and archive_type is None else entry_type_for_path(child, archive_type=archive_type)
         entries.append(
             ExplorerEntry(
                 name=child.name,
                 relative_path=relative_to_root(root, child),
-                is_dir=child.is_dir(),
-                size=None if child.is_dir() else stats.st_size,
+                is_dir=is_dir,
+                size=None if is_dir else stats.st_size,
                 modified_at=modified_at,
                 is_zip=archive_type == "zip",
                 is_archive=archive_type is not None,
                 archive_type=archive_type,
                 entry_type=entry_type,
-                extension=child.suffix.lower().lstrip(".") if child.is_file() else "",
-                is_symlink=child.is_symlink(),
+                extension=child.suffix.lower().lstrip(".") if not is_dir else "",
+                is_symlink=is_symlink,
                 can_extract=archive_type is not None,
                 can_compile_bluray=entry_type == "bluray",
             )

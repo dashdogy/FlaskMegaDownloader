@@ -83,6 +83,24 @@ class InteractiveExplorerHelperTests(unittest.TestCase):
         self.assertEqual(entries["disc"]["entry_type"], "bluray")
         self.assertTrue(entries["disc"]["can_compile_bluray"])
 
+    def test_directory_listing_tolerates_broken_symlinks(self) -> None:
+        with TemporaryDirectory(prefix="interactive-symlink-") as temp_dir:
+            root = Path(temp_dir)
+            (root / "good.mkv").write_text("payload", encoding="utf-8")
+            (root / "missing-link").symlink_to(root / "missing-target")
+
+            payload = list_directory(
+                {"downloads": {"key": "downloads", "label": "Downloads", "path": root}},
+                "downloads",
+                "",
+                "name",
+            )
+
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertEqual(entries["missing-link"]["entry_type"], "symlink")
+        self.assertTrue(entries["missing-link"]["is_symlink"])
+        self.assertEqual(entries["good.mkv"]["entry_type"], "file")
+
     def test_mutations_reject_root_and_traversal(self) -> None:
         with TemporaryDirectory(prefix="interactive-reject-") as temp_dir:
             root = Path(temp_dir)
