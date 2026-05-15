@@ -99,7 +99,10 @@ def validate_entry_name(name: str) -> str:
 
 
 def is_bluray_directory(path: Path) -> bool:
-    return path.is_dir() and (path / "BDMV" / "index.bdmv").is_file()
+    try:
+        return path.is_dir() and (path / "BDMV" / "index.bdmv").is_file()
+    except OSError:
+        return False
 
 
 def entry_type_for_path(path: Path, *, archive_type: str | None = None) -> str:

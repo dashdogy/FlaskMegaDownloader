@@ -101,6 +101,19 @@ class InteractiveExplorerHelperTests(unittest.TestCase):
         self.assertTrue(entries["missing-link"]["is_symlink"])
         self.assertEqual(entries["good.mkv"]["entry_type"], "file")
 
+    def test_unreadable_bluray_probe_does_not_break_directory_listing(self) -> None:
+        with TemporaryDirectory(prefix="interactive-bluray-denied-") as temp_dir:
+            root = Path(temp_dir)
+            (root / "disc" / "BDMV").mkdir(parents=True)
+            destinations = {"downloads": {"key": "downloads", "label": "Downloads", "path": root}}
+
+            with patch.object(Path, "is_file", side_effect=PermissionError("denied")):
+                payload = list_directory(destinations, "downloads", "", "name")
+
+        entries = {entry["name"]: entry for entry in payload["entries"]}
+        self.assertEqual(entries["disc"]["entry_type"], "folder")
+        self.assertFalse(entries["disc"]["can_compile_bluray"])
+
     def test_directory_listing_reports_unreadable_folder_without_internal_error(self) -> None:
         with TemporaryDirectory(prefix="interactive-denied-") as temp_dir:
             root = Path(temp_dir)
