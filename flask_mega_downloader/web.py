@@ -536,6 +536,16 @@ def create_app() -> Flask:
         sort_order = request.args.get("order", "asc")
         try:
             payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except PermissionError as exc:
+            flash(str(exc), "error")
+            log_event(
+                "error",
+                "explorer",
+                "open",
+                "Explorer open failed because the app user cannot read the folder.",
+                context={"root": root_key, "path": current_path, "error": str(exc)},
+            )
+            return redirect(url_for("dashboard"))
         except (ValueError, FileNotFoundError) as exc:
             flash(str(exc), "error")
             fallback_root = destination_options[0]["key"]
@@ -1143,6 +1153,8 @@ def create_app() -> Flask:
         sort_order = request.args.get("order", "asc")
         try:
             payload = build_explorer_payload(requested_root, requested_path, sort_by, sort_order)
+        except PermissionError as exc:
+            return json_error(str(exc), status=403)
         except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc))
         return json_success(**payload)
@@ -1156,6 +1168,8 @@ def create_app() -> Flask:
         requested_path = request.args.get("path", "")
         try:
             payload = list_directory_tree(manager.destinations, requested_root, requested_path)
+        except PermissionError as exc:
+            return json_error(str(exc), status=403)
         except (ValueError, FileNotFoundError) as exc:
             return json_error(str(exc))
         return json_success(tree=payload)

@@ -401,6 +401,13 @@ def _entry_stat(path: Path):
             return None
 
 
+def _iter_directory(path: Path):
+    try:
+        return list(path.iterdir())
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied while reading folder '{path}'.") from exc
+
+
 def list_directory_tree(
     destinations: dict[str, dict],
     root_key: str,
@@ -413,8 +420,12 @@ def list_directory_tree(
         raise FileNotFoundError("Requested folder does not exist.")
 
     directories: list[dict] = []
-    for child in current_path.iterdir():
-        if not child.is_dir():
+    for child in _iter_directory(current_path):
+        stats = _entry_stat(child)
+        if stats is None:
+            continue
+        is_dir = stat.S_ISDIR(stats.st_mode) and not child.is_symlink()
+        if not is_dir:
             continue
         directories.append(
             {
@@ -450,7 +461,7 @@ def list_directory(
         raise FileNotFoundError("Requested folder does not exist.")
 
     entries: list[ExplorerEntry] = []
-    for child in current_path.iterdir():
+    for child in _iter_directory(current_path):
         stats = _entry_stat(child)
         if stats is None:
             continue

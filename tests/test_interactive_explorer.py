@@ -101,6 +101,17 @@ class InteractiveExplorerHelperTests(unittest.TestCase):
         self.assertTrue(entries["missing-link"]["is_symlink"])
         self.assertEqual(entries["good.mkv"]["entry_type"], "file")
 
+    def test_directory_listing_reports_unreadable_folder_without_internal_error(self) -> None:
+        with TemporaryDirectory(prefix="interactive-denied-") as temp_dir:
+            root = Path(temp_dir)
+            destinations = {"downloads": {"key": "downloads", "label": "Downloads", "path": root}}
+
+            with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):
+                with self.assertRaises(PermissionError) as context:
+                    list_directory(destinations, "downloads", "", "name")
+
+        self.assertIn("Permission denied while reading folder", str(context.exception))
+
     def test_mutations_reject_root_and_traversal(self) -> None:
         with TemporaryDirectory(prefix="interactive-reject-") as temp_dir:
             root = Path(temp_dir)
@@ -240,6 +251,24 @@ class InteractiveExplorerRouteTests(unittest.TestCase):
         self.assertEqual(payload["explorer"]["current_path"], "subdir")
         self.assertEqual(payload["explorer"]["sort"], "modified")
         self.assertEqual(payload["explorer"]["order"], "desc")
+
+    def test_api_explorer_returns_403_for_unreadable_folder(self) -> None:
+        with TemporaryDirectory(prefix="interactive-api-denied-", ignore_cleanup_errors=True) as temp_dir:
+            root = Path(temp_dir)
+            config_path = self._write_config(root, auth_enabled=False)
+            with patch.dict(os.environ, {"MEGA_DOWNLOADER_CONFIG": str(config_path)}, clear=False):
+                flask_app = app_module.create_app()
+                client = flask_app.test_client()
+                try:
+                    with patch("flask_mega_downloader.web.list_directory", side_effect=PermissionError("cannot read")):
+                        response = client.get("/api/explorer?root=downloads")
+                    payload = response.get_json()
+                finally:
+                    self._stop_app(flask_app)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "cannot read")
 
     def test_json_mutations_are_csrf_protected_when_auth_is_enabled(self) -> None:
         with TemporaryDirectory(prefix="interactive-csrf-", ignore_cleanup_errors=True) as temp_dir:
