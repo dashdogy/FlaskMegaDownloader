@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="ops-grid roots-page">
+    <article class="panel">
+        <p class="eyebrow">Profile</p>
+        <h2>Admin account</h2>
+        <div class="destination-stack">
+            <div class="destination-pill">
+                <span>Username</span>
+                <small>{{ admin_username }}</small>
+            </div>
+            <div class="destination-pill">
+                <span>Built-in auth</span>
+                <small>{% if auth_enabled %}Enabled{% else %}Disabled{% endif %}</small>
+            </div>
+        </div>
+        {% if password_hash_environment_sourced %}
+            <div class="flash flash-error">
+                Password changes are managed by MEGA_DOWNLOADER_ADMIN_PASSWORD_HASH for this deployment.
+            </div>
+        {% endif %}
+    </article>
+
+    <article class="panel">
+        <p class="eyebrow">Security</p>
+        <h2>Reset password</h2>
+        <form action="{{ url_for('change_profile_password') }}" method="post" class="submit-form">
+            <label for="current_password">Current password</label>
+            <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+            <label for="new_password">New password</label>
+            <input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="{{ min_password_length }}" required>
+            <label for="confirm_password">Confirm new password</label>
+            <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password" minlength="{{ min_password_length }}" required>
+            <p class="subtle form-hint">Use at least {{ min_password_length }} characters. Existing sessions are signed out after the reset.</p>
+            <button type="submit" {% if not password_change_available %}disabled{% endif %}>Update Password</button>
+        </form>
+    </article>
+</section>
+{% endblock %}

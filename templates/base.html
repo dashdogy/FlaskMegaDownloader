@@ -21,6 +21,7 @@
             <a href="{{ url_for('explorer') }}" class="{% if request.endpoint in ['explorer', 'api_explorer', 'explorer_move', 'explorer_compile_bluray', 'explorer_delete', 'explorer_extract', 'explorer_rename'] %}active{% endif %}">Explorer</a>
             <a href="{{ url_for('logs') }}" class="{% if request.endpoint in ['logs', 'api_logs'] %}active{% endif %}">Logs</a>
             <a href="{{ url_for('roots') }}" class="{% if request.endpoint in ['roots', 'add_favorite', 'delete_destination', 'restore_destinations'] %}active{% endif %}">Roots</a>
+            <a href="{{ url_for('profile') }}" class="{% if request.endpoint in ['profile', 'change_profile_password'] %}active{% endif %}">Profile</a>
             {% if auth_enabled %}
                 <form action="{{ url_for('logout') }}" method="post" class="inline-form">
                     <button type="submit" class="ghost-button">Sign Out</button>

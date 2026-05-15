@@ -34,6 +34,7 @@ Supported LXC guest OS versions:
 
 - Server-rendered Flask/Jinja app with an operations-focused dashboard and no frontend build step
 - Built-in login sessions and CSRF protection for mutating routes
+- Profile page for signed-in admins to reset the built-in login password
 - Multi-link submission with whitespace trimming, blank-line removal, and per-batch deduplication
 - Inline Filecrypt container resolution for public `filecrypt.cc` pages that redirect to MEGA
 - Configurable background download, archive, and media worker pools with SQLite-backed persisted state
@@ -216,6 +217,7 @@ mediainfo --Version
 
 - Built-in auth is enabled by default. HTML routes require login except `/login`, `/logout`, and static assets.
 - POST routes require a CSRF token, supplied by rendered forms and by the shared `fetch` wrapper in `static/security.js`.
+- Profile password resets require the current password and rewrite `ADMIN_PASSWORD_HASH` in the active config file; environment-managed hashes must be changed through the environment.
 - Explorer navigation is restricted with `Path.resolve()` checks under configured roots only.
 - Absolute destination paths are promoted into saved roots before use; routine actions only accept relative paths inside those roots.
 - Output permission grants use `setfacl` for the configured `PLEX_USER` instead of broad world-writable permissions.

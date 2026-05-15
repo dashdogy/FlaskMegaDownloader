@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import secrets
 from functools import wraps
@@ -12,6 +13,7 @@ from werkzeug.security import check_password_hash
 F = TypeVar("F", bound=Callable)
 CSRF_SESSION_KEY = "_csrf_token"
 USER_SESSION_KEY = "admin_authenticated"
+PASSWORD_FINGERPRINT_SESSION_KEY = "admin_password_fingerprint"
 
 
 def auth_enabled() -> bool:
@@ -22,10 +24,29 @@ def password_configured() -> bool:
     return bool(str(current_app.config.get("ADMIN_PASSWORD_HASH", "") or "").strip())
 
 
+def current_password_hash() -> str:
+    return str(current_app.config.get("ADMIN_PASSWORD_HASH", "") or "")
+
+
+def password_hash_fingerprint(password_hash: str | None = None) -> str:
+    configured_hash = current_password_hash() if password_hash is None else str(password_hash or "")
+    if not configured_hash:
+        return ""
+    return hashlib.sha256(configured_hash.encode("utf-8")).hexdigest()
+
+
 def current_user_authenticated() -> bool:
     if not auth_enabled():
         return True
-    return bool(session.get(USER_SESSION_KEY))
+    if not session.get(USER_SESSION_KEY):
+        return False
+    expected_fingerprint = password_hash_fingerprint()
+    session_fingerprint = str(session.get(PASSWORD_FINGERPRINT_SESSION_KEY, ""))
+    return bool(
+        expected_fingerprint
+        and session_fingerprint
+        and hmac.compare_digest(session_fingerprint, expected_fingerprint)
+    )
 
 
 def csrf_token() -> str:
@@ -50,7 +71,7 @@ def validate_csrf_request() -> bool:
 
 def login_user(username: str, password: str) -> bool:
     configured_username = str(current_app.config.get("ADMIN_USERNAME", "admin"))
-    configured_hash = str(current_app.config.get("ADMIN_PASSWORD_HASH", "") or "")
+    configured_hash = current_password_hash()
     if not configured_hash:
         return False
     if not hmac.compare_digest(username, configured_username):
@@ -59,8 +80,16 @@ def login_user(username: str, password: str) -> bool:
         return False
     session.clear()
     session[USER_SESSION_KEY] = True
+    session[PASSWORD_FINGERPRINT_SESSION_KEY] = password_hash_fingerprint(configured_hash)
     csrf_token()
     return True
+
+
+def verify_current_password(password: str) -> bool:
+    configured_hash = current_password_hash()
+    if not configured_hash:
+        return False
+    return check_password_hash(configured_hash, password)
 
 
 def logout_user() -> None:
@@ -101,4 +130,3 @@ def login_required(fn: F) -> F:
         return fn(*args, **kwargs)
 
     return wrapper  # type: ignore[return-value]
-

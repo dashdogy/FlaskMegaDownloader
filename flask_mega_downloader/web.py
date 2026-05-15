@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -20,6 +21,7 @@ from flask_mega_downloader.security import (
     password_configured,
     require_authentication,
     require_csrf,
+    verify_current_password,
 )
 from archive_extract_manager import ArchiveExtractManager
 from archive_auto_sort import guessit_available
@@ -32,8 +34,10 @@ from archives import (
 from downloader import DownloadManager, ensure_destination_writable
 from event_log import EventLogService, install_event_log_bridge
 from explorer import (
+    create_directory,
     delete_entries,
     list_directory,
+    list_directory_tree,
     move_entries,
     normalize_user_path_input,
     path_within_root,
@@ -49,6 +53,11 @@ from media_compiler import MediaCompileManager, detect_bluray_source
 from models import ACTIVE_ARCHIVE_JOB_STATUSES, MoveFavorite, utcnow_iso
 from plex_permissions import PlexPermissionManager
 from storage import JsonStorage
+from werkzeug.security import generate_password_hash
+
+
+MIN_ADMIN_PASSWORD_LENGTH = 12
+ADMIN_PASSWORD_HASH_RE = re.compile(r"(?m)^ADMIN_PASSWORD_HASH\s*=.*$")
 
 
 def format_bytes(value: int | float | None) -> str:
@@ -131,6 +140,31 @@ def submission_source_summary(urls: list[str]) -> dict[str, int]:
     return summary
 
 
+def password_hash_is_environment_sourced(config_path: Path) -> bool:
+    env_hash = os.environ.get("MEGA_DOWNLOADER_ADMIN_PASSWORD_HASH", "")
+    if not env_hash:
+        return False
+    try:
+        content = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    match = ADMIN_PASSWORD_HASH_RE.search(content)
+    if not match:
+        return True
+    assignment = match.group(0)
+    return "os.environ" in assignment or "MEGA_DOWNLOADER_ADMIN_PASSWORD_HASH" in assignment
+
+
+def write_admin_password_hash(config_path: Path, password_hash: str) -> None:
+    replacement = f"ADMIN_PASSWORD_HASH = {password_hash!r}"
+    content = config_path.read_text(encoding="utf-8")
+    if ADMIN_PASSWORD_HASH_RE.search(content):
+        updated = ADMIN_PASSWORD_HASH_RE.sub(replacement, content, count=1)
+    else:
+        updated = content.rstrip() + "\n\n" + replacement + "\n"
+    config_path.write_text(updated, encoding="utf-8")
+
+
 def create_app() -> Flask:
     package_dir = Path(__file__).resolve().parent
     repo_root = package_dir.parent
@@ -142,7 +176,9 @@ def create_app() -> Flask:
     app.config.from_object(default_config)
 
     extra_config = os.environ.get("MEGA_DOWNLOADER_CONFIG")
+    active_config_path = Path(default_config.__file__).expanduser().resolve()
     if extra_config:
+        active_config_path = Path(extra_config).expanduser().resolve()
         app.config.from_pyfile(extra_config)
     apply_runtime_defaults(app.config)
 
@@ -240,6 +276,7 @@ def create_app() -> Flask:
     app.extensions["event_logger"] = event_logger
     app.extensions["event_log_bridge_handler"] = bridge_handler
     app.extensions["permission_manager"] = permission_manager
+    app.extensions["active_config_path"] = active_config_path
     atexit.register(manager.stop)
     atexit.register(media_manager.stop)
     atexit.register(archive_manager.stop)
@@ -328,6 +365,36 @@ def create_app() -> Flask:
             "updated_at": utcnow_iso(),
         }
 
+    def json_request_payload() -> dict:
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else {}
+
+    def json_error(message: str, *, status: int = 400, **payload):
+        body = {"ok": False, "error": message}
+        body.update(payload)
+        return jsonify(body), status
+
+    def json_success(**payload):
+        body = {"ok": True}
+        body.update(payload)
+        return jsonify(body)
+
+    def bool_payload_value(payload: dict, key: str, *, default: bool = False) -> bool:
+        value = payload.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def selected_paths_from_payload(payload: dict) -> list[str]:
+        raw_paths = payload.get("selected_paths", payload.get("paths", []))
+        if isinstance(raw_paths, str):
+            return [raw_paths]
+        if not isinstance(raw_paths, list):
+            return []
+        return [str(item) for item in raw_paths]
+
     def log_event(level: str, subsystem: str, feature: str, message: str, **kwargs):
         event_logger.log(level, subsystem, feature, message, **kwargs)
 
@@ -359,16 +426,27 @@ def create_app() -> Flask:
 
         return favorite_for_label("Movies"), favorite_for_label("TvShows")
 
+    def persist_archive_automation_settings(
+        *,
+        auto_sort_enabled: bool,
+        auto_delete_enabled: bool,
+    ) -> dict:
+        auto_delete_enabled = bool(auto_sort_enabled and auto_delete_enabled)
+        if auto_sort_enabled:
+            resolve_archive_auto_sort_targets()
+        return manager.update_archive_automation_settings(
+            auto_sort_enabled=auto_sort_enabled,
+            auto_delete_enabled=auto_delete_enabled,
+        )
+
     def persist_archive_automation_settings_from_form(
         *,
         auto_sort_field: str = "archive_auto_sort_enabled",
         auto_delete_field: str = "archive_auto_delete_enabled",
     ) -> dict:
         auto_sort_enabled = request.form.get(auto_sort_field) == "1"
-        auto_delete_enabled = auto_sort_enabled and request.form.get(auto_delete_field) == "1"
-        if auto_sort_enabled:
-            resolve_archive_auto_sort_targets()
-        return manager.update_archive_automation_settings(
+        auto_delete_enabled = request.form.get(auto_delete_field) == "1"
+        return persist_archive_automation_settings(
             auto_sort_enabled=auto_sort_enabled,
             auto_delete_enabled=auto_delete_enabled,
         )
@@ -404,25 +482,7 @@ def create_app() -> Flask:
             "created": True,
         }
 
-    def render_explorer_page(
-        root_key: str,
-        current_path: str,
-        sort_by: str,
-        *,
-        move_confirmation: dict | None = None,
-    ):
-        destination_options = manager.destination_options()
-        if not destination_options:
-            flash("No destinations are configured. Restore or add one before opening the explorer.", "error")
-            return redirect(url_for("dashboard"))
-
-        try:
-            payload = list_directory(manager.destinations, root_key, current_path, sort_by)
-        except (ValueError, FileNotFoundError) as exc:
-            flash(str(exc), "error")
-            fallback_root = destination_options[0]["key"]
-            return redirect(url_for("explorer", root=fallback_root))
-
+    def explorer_archive_context(payload: dict) -> tuple[list[dict], dict]:
         archive_dashboard = archive_manager.dashboard_payload()
         explorer_archive_jobs = [
             job
@@ -441,15 +501,56 @@ def create_app() -> Flask:
             "failed_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "failed"),
             "canceled_jobs": sum(1 for job in explorer_archive_jobs if job["status"] == "canceled"),
         }
+        return explorer_archive_jobs, explorer_archive_summary
+
+    def build_explorer_payload(
+        root_key: str,
+        current_path: str,
+        sort_by: str = "name",
+        sort_order: str = "asc",
+    ) -> dict:
+        explorer_payload = list_directory(manager.destinations, root_key, current_path, sort_by, sort_order)
+        explorer_archive_jobs, explorer_archive_summary = explorer_archive_context(explorer_payload)
+        return {
+            "explorer": explorer_payload,
+            "roots": manager.destination_options(),
+            "move_favorites": move_favorite_options(),
+            "media_backend": media_manager.backend_payload(),
+            "archive_jobs": explorer_archive_jobs,
+            "archive_summary": explorer_archive_summary,
+            "archive_automation_settings": manager.archive_automation_settings_payload(),
+        }
+
+    def render_explorer_page(
+        root_key: str,
+        current_path: str,
+        sort_by: str,
+        *,
+        move_confirmation: dict | None = None,
+    ):
+        destination_options = manager.destination_options()
+        if not destination_options:
+            flash("No destinations are configured. Restore or add one before opening the explorer.", "error")
+            return redirect(url_for("dashboard"))
+
+        sort_order = request.args.get("order", "asc")
+        try:
+            payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except (ValueError, FileNotFoundError) as exc:
+            flash(str(exc), "error")
+            fallback_root = destination_options[0]["key"]
+            return redirect(url_for("explorer", root=fallback_root))
+        explorer_payload = payload["explorer"]
 
         return render_template(
             "explorer.html",
-            explorer=payload,
-            move_favorites=move_favorite_options(),
+            explorer=explorer_payload,
+            explorer_payload=payload,
+            move_favorites=payload["move_favorites"],
             move_confirmation=move_confirmation,
-            media_backend=media_manager.backend_payload(),
-            explorer_archive_jobs=explorer_archive_jobs,
-            explorer_archive_summary=explorer_archive_summary,
+            media_backend=payload["media_backend"],
+            explorer_archive_jobs=payload["archive_jobs"],
+            explorer_archive_summary=payload["archive_summary"],
         )
 
     def extract_archives_in_folder(
@@ -577,6 +678,67 @@ def create_app() -> Flask:
     @app.get("/roots")
     def roots():
         return render_template("roots.html")
+
+    @app.get("/profile")
+    def profile():
+        config_path = app.extensions["active_config_path"]
+        return render_template(
+            "profile.html",
+            admin_username=app.config.get("ADMIN_USERNAME", "admin"),
+            min_password_length=MIN_ADMIN_PASSWORD_LENGTH,
+            password_change_available=(
+                bool(app.config["AUTH_ENABLED"])
+                and password_configured()
+                and not password_hash_is_environment_sourced(config_path)
+            ),
+            password_hash_environment_sourced=password_hash_is_environment_sourced(config_path),
+        )
+
+    @app.post("/profile/password")
+    def change_profile_password():
+        config_path = app.extensions["active_config_path"]
+        if not app.config["AUTH_ENABLED"]:
+            flash("Password changes are unavailable while built-in auth is disabled.", "error")
+            return redirect(url_for("profile"))
+        if password_hash_is_environment_sourced(config_path):
+            flash(
+                "This password is managed by MEGA_DOWNLOADER_ADMIN_PASSWORD_HASH. Change that environment variable instead.",
+                "error",
+            )
+            return redirect(url_for("profile"))
+
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not verify_current_password(current_password):
+            flash("Current password is incorrect.", "error")
+            return redirect(url_for("profile"))
+        if len(new_password) < MIN_ADMIN_PASSWORD_LENGTH:
+            flash(f"New password must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters.", "error")
+            return redirect(url_for("profile"))
+        if new_password != confirm_password:
+            flash("New password and confirmation do not match.", "error")
+            return redirect(url_for("profile"))
+
+        new_password_hash = generate_password_hash(new_password)
+        try:
+            write_admin_password_hash(config_path, new_password_hash)
+        except OSError as exc:
+            flash(f"Could not update the active config file: {exc}", "error")
+            return redirect(url_for("profile"))
+
+        app.config["ADMIN_PASSWORD_HASH"] = new_password_hash
+        log_event(
+            "info",
+            "auth",
+            "profile",
+            "Admin password changed from the profile page.",
+            context={"config_path": str(config_path)},
+        )
+        logout_user()
+        flash("Password updated. Sign in with the new password.", "success")
+        return redirect(url_for("login"))
 
     @app.post("/submit")
     def submit():
@@ -974,15 +1136,276 @@ def create_app() -> Flask:
     def api_explorer():
         destination_options = manager.destination_options()
         if not destination_options:
-            return jsonify({"error": "No destinations are configured."}), 400
+            return json_error("No destinations are configured.")
         requested_root = request.args.get("root") or destination_options[0]["key"]
         requested_path = request.args.get("path", "")
         sort_by = request.args.get("sort", "name")
+        sort_order = request.args.get("order", "asc")
         try:
-            payload = list_directory(manager.destinations, requested_root, requested_path, sort_by)
+            payload = build_explorer_payload(requested_root, requested_path, sort_by, sort_order)
         except (ValueError, FileNotFoundError) as exc:
-            return jsonify({"error": str(exc)}), 400
-        return jsonify(payload)
+            return json_error(str(exc))
+        return json_success(**payload)
+
+    @app.get("/api/explorer/tree")
+    def api_explorer_tree():
+        destination_options = manager.destination_options()
+        if not destination_options:
+            return json_error("No destinations are configured.")
+        requested_root = request.args.get("root") or destination_options[0]["key"]
+        requested_path = request.args.get("path", "")
+        try:
+            payload = list_directory_tree(manager.destinations, requested_root, requested_path)
+        except (ValueError, FileNotFoundError) as exc:
+            return json_error(str(exc))
+        return json_success(tree=payload)
+
+    @app.post("/api/explorer/folders")
+    def api_explorer_create_folder():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        name = str(payload.get("name", ""))
+        try:
+            created = create_directory(
+                manager.destinations,
+                root_key,
+                current_path,
+                name,
+                permission_manager=permission_manager,
+            )
+            explorer_payload = build_explorer_payload(
+                root_key,
+                current_path,
+                str(payload.get("sort", "name")),
+                str(payload.get("order", "asc")),
+            )
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            log_event("error", "explorer", "mkdir", "Explorer folder creation failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "explorer", "mkdir", "Created explorer folder.", context={"root": root_key, "path": created["relative_path"]})
+        return json_success(created=created, **explorer_payload)
+
+    @app.post("/api/explorer/rename")
+    def api_explorer_rename():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        sort_by = str(payload.get("sort", "name"))
+        sort_order = str(payload.get("order", "asc"))
+        relative_path = str(payload.get("entry_path", ""))
+        new_name = str(payload.get("new_name", ""))
+        try:
+            result = rename_entry(manager.destinations, root_key, current_path, relative_path, new_name)
+            explorer_payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "explorer", "rename", "Explorer JSON rename failed.", context={"root": root_key, "path": current_path, "entry_path": relative_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "explorer", "rename", "Processed explorer JSON rename request.", context={"root": root_key, "path": current_path, "renamed": result["renamed"], "name": result["name"]})
+        return json_success(result=result, **explorer_payload)
+
+    @app.post("/api/explorer/delete")
+    def api_explorer_delete():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        sort_by = str(payload.get("sort", "name"))
+        sort_order = str(payload.get("order", "asc"))
+        selected_paths = selected_paths_from_payload(payload)
+        if not bool_payload_value(payload, "confirm_delete"):
+            return json_error("Delete confirmation required.", status=409, requires_confirmation=True, selected_paths=selected_paths)
+        try:
+            result = delete_entries(manager.destinations, root_key, current_path, selected_paths)
+            explorer_payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "explorer", "delete", "Explorer JSON delete failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "explorer", "delete", "Processed explorer JSON delete request.", context={"root": root_key, "path": current_path, "deleted": len(result["deleted"]), "failures": len(result["failures"])})
+        return json_success(result=result, **explorer_payload)
+
+    @app.post("/api/explorer/move/preview")
+    def api_explorer_move_preview():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        selected_paths = selected_paths_from_payload(payload)
+        move_target = normalize_move_target_input(str(payload.get("move_target", "")))
+        try:
+            preview = preview_move_entries(manager.destinations, root_key, current_path, selected_paths, move_target)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "explorer", "move_preview", "Explorer JSON move preview failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        return json_success(
+            target_dir=str(preview["target_dir"]),
+            conflicts=preview["conflicts"],
+            entries=[{"relative_path": relative_path, "name": path.name} for relative_path, path in preview["entries"]],
+            requires_confirmation=bool(preview["conflicts"]),
+        )
+
+    @app.post("/api/explorer/move")
+    def api_explorer_move():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        sort_by = str(payload.get("sort", "name"))
+        sort_order = str(payload.get("order", "asc"))
+        selected_paths = selected_paths_from_payload(payload)
+        move_target = normalize_move_target_input(str(payload.get("move_target", "")))
+        replace_existing = bool_payload_value(payload, "replace_existing")
+
+        try:
+            preview = preview_move_entries(manager.destinations, root_key, current_path, selected_paths, move_target)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "explorer", "move", "Explorer JSON move preview failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+
+        if preview["conflicts"] and not replace_existing:
+            return json_error(
+                "Move target contains existing items.",
+                status=409,
+                requires_confirmation=True,
+                target_dir=str(preview["target_dir"]),
+                conflicts=preview["conflicts"],
+            )
+
+        try:
+            ensure_destination_writable(preview["target_dir"])
+            result = move_entries(
+                manager.destinations,
+                root_key,
+                current_path,
+                selected_paths,
+                move_target,
+                replace_existing=replace_existing,
+                permission_manager=permission_manager,
+            )
+            explorer_payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "explorer", "move", "Explorer JSON move failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "explorer", "move", "Processed explorer JSON move request.", context={"target_dir": str(result["target_dir"]), "moved": len(result["moved"]), "replaced": len(result["replaced"]), "failures": len(result["failures"])})
+        return json_success(result=result, **explorer_payload)
+
+    @app.post("/api/explorer/move-favorites")
+    def api_explorer_move_favorites():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        move_target = normalize_move_target_input(str(payload.get("move_target", "")))
+        if not move_target:
+            return json_error("Enter a move target path before saving it.")
+        try:
+            favorite = save_move_favorite(root_key, current_path, move_target)
+        except ValueError as exc:
+            log_event("error", "explorer", "move_favorite", "Explorer JSON move target favorite add failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "explorer", "move_favorite", "Processed explorer JSON move target favorite request.", context={"created": favorite["created"], "path": favorite["path"]})
+        return json_success(favorite=favorite, move_favorites=move_favorite_options())
+
+    @app.post("/api/explorer/archive-settings")
+    def api_explorer_archive_settings():
+        payload = json_request_payload()
+        try:
+            settings = persist_archive_automation_settings(
+                auto_sort_enabled=bool_payload_value(payload, "archive_auto_sort_enabled"),
+                auto_delete_enabled=bool_payload_value(payload, "archive_auto_delete_enabled"),
+            )
+        except ValueError as exc:
+            log_event("error", "archive", "settings", "Explorer JSON archive automation settings update failed.", context={"error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "archive", "settings", "Saved explorer JSON archive automation defaults.", context=settings)
+        return json_success(archive_automation_settings=settings)
+
+    @app.post("/api/explorer/extract")
+    def api_explorer_extract():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        sort_by = str(payload.get("sort", "name"))
+        sort_order = str(payload.get("order", "asc"))
+        selected_paths = selected_paths_from_payload(payload)
+        password = str(payload.get("password") or "") or None
+        try:
+            archive_automation_settings = persist_archive_automation_settings(
+                auto_sort_enabled=bool_payload_value(payload, "archive_auto_sort_enabled"),
+                auto_delete_enabled=bool_payload_value(payload, "archive_auto_delete_enabled"),
+            )
+            result = extract_archives_in_folder(
+                root_key,
+                current_path,
+                selected_paths,
+                password=password,
+                skip_non_archive=True,
+                auto_sort_enabled=archive_automation_settings["auto_sort_enabled"],
+                auto_delete_enabled=archive_automation_settings["auto_delete_enabled"],
+            )
+            explorer_payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except (ValueError, FileNotFoundError, ArchiveError) as exc:
+            log_event("error", "archive", "queue", "Explorer JSON archive extraction queue request failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+        log_event("info", "archive", "queue", "Processed explorer JSON archive extraction queue request.", context={"root": root_key, "path": current_path, "queued": len(result["queued"]), "skipped": len(result["skipped"]), "failures": len(result["failures"])})
+        return json_success(result=result, **explorer_payload)
+
+    @app.post("/api/explorer/compile-bluray")
+    def api_explorer_compile_bluray():
+        payload = json_request_payload()
+        root_key = str(payload.get("root", ""))
+        current_path = str(payload.get("current_path", payload.get("path", "")))
+        sort_by = str(payload.get("sort", "name"))
+        sort_order = str(payload.get("order", "asc"))
+        selected_paths = selected_paths_from_payload(payload)
+        destination_key = str(payload.get("destination", ""))
+        destination_subpath = normalize_destination_path_input(str(payload.get("destination_path", "")))
+
+        backend = media_manager.backend_payload()
+        if not backend["available"]:
+            return json_error(backend["reason"] or "Blu-ray remux backend is unavailable.")
+
+        try:
+            _, _, resolved_entries = resolve_entries_in_directory(
+                manager.destinations,
+                root_key,
+                current_path,
+                selected_paths,
+            )
+            output_destination_path, output_destination_relative_path, output_destination_is_custom = manager.resolve_destination(
+                destination_key,
+                destination_subpath,
+            )
+            ensure_destination_writable(output_destination_path)
+        except (ValueError, FileNotFoundError) as exc:
+            log_event("error", "bluray", "queue", "Explorer JSON Blu-ray selection failed.", context={"root": root_key, "path": current_path, "error": str(exc)})
+            return json_error(str(exc))
+
+        valid_sources = []
+        skipped: list[str] = []
+        for relative_path, entry_path in resolved_entries:
+            source = detect_bluray_source(entry_path, relative_path)
+            if source is None:
+                skipped.append(entry_path.name)
+                continue
+            valid_sources.append(source)
+
+        if not valid_sources:
+            return json_error("Select one or more Blu-ray folders that contain BDMV/index.bdmv.")
+
+        try:
+            jobs = media_manager.submit(
+                valid_sources,
+                source_root_key=root_key,
+                output_destination_key=destination_key,
+                output_destination_path=output_destination_path,
+                output_destination_relative_path=output_destination_relative_path,
+                output_destination_is_custom=output_destination_is_custom,
+            )
+            explorer_payload = build_explorer_payload(root_key, current_path, sort_by, sort_order)
+        except ValueError as exc:
+            log_event("error", "bluray", "queue", "Explorer JSON Blu-ray queue request failed.", context={"error": str(exc)})
+            return json_error(str(exc))
+
+        result = {"queued": len(jobs), "skipped": skipped}
+        log_event("info", "bluray", "queue", "Queued explorer JSON Blu-ray remux jobs.", batch_id=jobs[0].batch_id if jobs else None, context={"queued": len(jobs), "skipped": len(skipped), "destination_key": destination_key})
+        return json_success(result=result, **explorer_payload)
 
     @app.post("/explorer/delete")
     def explorer_delete():

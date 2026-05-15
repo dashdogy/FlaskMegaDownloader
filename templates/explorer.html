@@ -1,336 +1,189 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="card section-card explorer-shell">
-    <div class="section-heading">
-        <div>
-            <p class="eyebrow">File Explorer</p>
-            <h2>{{ explorer.root.label }}</h2>
-        </div>
-        <div class="sort-links">
-            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='name') }}" class="{% if explorer.sort == 'name' %}active{% endif %}">Name</a>
-            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='size') }}" class="{% if explorer.sort == 'size' %}active{% endif %}">Size</a>
-            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort='modified') }}" class="{% if explorer.sort == 'modified' %}active{% endif %}">Modified</a>
-        </div>
-    </div>
+<section
+    class="explorer-app"
+    id="explorer-app"
+    data-root="{{ explorer.root.key }}"
+    data-path="{{ explorer.current_path }}"
+    data-sort="{{ explorer.sort }}"
+    data-order="{{ explorer.order }}"
+>
+    <script id="initial-explorer-payload" type="application/json">{{ explorer_payload|tojson }}</script>
+    <script id="initial-explorer-archives" type="application/json">{{ explorer_archive_jobs|tojson }}</script>
 
-    <div class="root-tabs">
-        {% for destination in destinations %}
-            <a href="{{ url_for('explorer', root=destination.key) }}" class="{% if destination.key == explorer.root.key %}active{% endif %}">
-                {{ destination.label }}
-            </a>
-        {% endfor %}
-    </div>
-
-    {% if explorer.current_path %}
-        <div class="breadcrumbs">
-            {% for crumb in explorer.breadcrumbs %}
-                <a href="{{ url_for('explorer', root=crumb.root, path=crumb.path, sort=explorer.sort) }}">{{ crumb.label }}</a>
-            {% endfor %}
-        </div>
-
-        <div class="explorer-meta">
-            <span>{{ explorer.current_label }}</span>
-            <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.parent_path, sort=explorer.sort) }}">Go Up</a>
-        </div>
-    {% endif %}
-
-    {% if move_confirmation %}
-        <div class="move-confirmation">
-            <strong>Replace existing items before moving?</strong>
-            <p class="subtle">
-                Nothing has been moved yet. {{ move_confirmation.conflicts|length }} selected item(s) already exist in
-                <code>{{ move_confirmation.target_path }}</code>.
-            </p>
-            <div class="move-confirmation-list">
-                {% for name in move_confirmation.conflicts %}
-                    <span class="status-pill failed">{{ name }}</span>
-                {% endfor %}
-            </div>
-            <form action="{{ url_for('explorer_move') }}" method="post" class="move-confirmation-form">
-                <input type="hidden" name="root" value="{{ explorer.root.key }}">
-                <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
-                <input type="hidden" name="sort" value="{{ explorer.sort }}">
-                <input type="hidden" name="move_target" value="{{ move_confirmation.target_input }}">
-                <input type="hidden" name="replace_existing" value="1">
-                {% for path in move_confirmation.selected_paths %}
-                    <input type="hidden" name="selected_paths" value="{{ path }}">
-                {% endfor %}
-                <button type="submit" class="danger-button">Replace And Move</button>
-                <a href="{{ url_for('explorer', root=explorer.root.key, path=explorer.current_path, sort=explorer.sort) }}" class="ghost-button">Cancel</a>
-            </form>
-        </div>
-    {% endif %}
-
-    <form action="{{ url_for('explorer_extract') }}" method="post" class="explorer-bulk-form" id="explorer-bulk-form">
-        <input type="hidden" name="root" value="{{ explorer.root.key }}">
-        <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
-        <input type="hidden" name="sort" value="{{ explorer.sort }}">
-
-        <div class="explorer-toolbar">
-            <div class="explorer-toolbar-summary">
-                <div class="explorer-summary-card">
-                    <span class="explorer-summary-label">Selection</span>
-                    <strong id="selection-count">No items selected</strong>
-                    <p class="subtle">Select files or folders below to use bulk actions.</p>
-                </div>
-                <div class="explorer-summary-card">
-                    <span class="explorer-summary-label">Current Folder</span>
-                    <strong>{{ explorer.current_label or explorer.root.label }}</strong>
-                    <p class="subtle">{{ explorer.entries|length }} visible item(s) in this view.</p>
-                </div>
-            </div>
-
-            <div class="explorer-tool-grid">
-                <section class="explorer-tool-card">
-                    <div class="explorer-tool-head">
-                        <p class="eyebrow">Move</p>
-                        <h3>Move selected items</h3>
-                        <p class="subtle">Pick a saved target or type a relative path inside the current saved root.</p>
-                    </div>
-                    <div class="explorer-field-grid">
-                        <div class="explorer-field">
-                            <label for="saved-move-target">Saved move target</label>
-                            <select id="saved-move-target" aria-label="Saved move targets">
-                                <option value="">Choose a saved target</option>
-                                {% for favorite in move_favorites %}
-                                    <option value="{{ favorite.path }}" data-path="{{ favorite.path }}">{{ favorite.label }}</option>
-                                {% endfor %}
-                            </select>
-                            <p class="explorer-field-help" id="saved-move-target-preview">Choose a saved target to copy its path here.</p>
-                        </div>
-                        <div class="explorer-field explorer-field-wide">
-                            <label for="move-target-path">Move target path</label>
-                            <input
-                                type="text"
-                                id="move-target-path"
-                                name="move_target"
-                                value="{{ move_confirmation.target_input if move_confirmation else '' }}"
-                                placeholder="Example: movies/archive or /mnt/storage/movies"
-                                aria-label="Move target path"
-                            >
-                            <p class="explorer-field-help">The selected items keep their names when moved.</p>
-                        </div>
-                    </div>
-                    <div class="explorer-tool-actions">
-                        <button type="submit" formaction="{{ url_for('explorer_move_favorites') }}" class="secondary-button" data-save-target disabled>Save Target</button>
-                        <button type="submit" formaction="{{ url_for('explorer_move') }}" class="secondary-button" data-move-action disabled>Move Selected</button>
-                        <button type="submit" formaction="{{ url_for('save_archive_automation_settings') }}" class="secondary-button">Save Archive Defaults</button>
-                    </div>
-                    <div class="explorer-field-grid">
-                        <div class="explorer-field explorer-field-wide">
-                            <label for="auto-sort-extracted-videos" class="checkbox-label">
-                                <input
-                                    type="checkbox"
-                                    id="auto-sort-extracted-videos"
-                                    name="archive_auto_sort_enabled"
-                                    value="1"
-                                    {% if archive_automation_settings.auto_sort_enabled %}checked{% endif %}
-                                >
-                                Auto-sort extracted videos after extraction
-                            </label>
-                            <p class="explorer-field-help">Requires exactly one saved move favorite named <strong>Movies</strong> and one named <strong>TvShows</strong>. Video files only are moved automatically.</p>
-                        </div>
-                        <div class="explorer-field explorer-field-wide">
-                            <label for="auto-delete-source-archives" class="checkbox-label">
-                                <input
-                                    type="checkbox"
-                                    id="auto-delete-source-archives"
-                                    name="archive_auto_delete_enabled"
-                                    value="1"
-                                    {% if archive_automation_settings.auto_delete_enabled %}checked{% endif %}
-                                >
-                                Auto delete source archives after successful auto-sort move
-                            </label>
-                            <p class="explorer-field-help">Only deletes the original archive files after at least one video was moved to Movies or TvShows. The extracted output folder is never removed.</p>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="explorer-tool-card">
-                    <div class="explorer-tool-head">
-                        <p class="eyebrow">Archive And Delete</p>
-                        <h3>Work with the current selection</h3>
-                        <p class="subtle">Use one shared password for ZIP, RAR, or 7Z extraction, or remove the selected items entirely.</p>
-                    </div>
-                    <div class="explorer-field-grid">
-                        <div class="explorer-field explorer-field-wide">
-                            <label for="bulk-zip-password">Shared archive password</label>
-                            <input id="bulk-zip-password" type="password" name="password" placeholder="Optional password for encrypted ZIP, RAR, or 7Z files">
-                            <p class="explorer-field-help">Leave this blank for normal ZIP, RAR, or 7Z archives.</p>
-                        </div>
-                    </div>
-                    <div class="explorer-tool-actions">
-                        <button type="submit" formaction="{{ url_for('explorer_extract') }}" class="secondary-button" data-selection-action disabled>Extract Selected Archives</button>
-                        <button type="submit" formaction="{{ url_for('explorer_delete') }}" class="danger-button" data-selection-action disabled>Delete Selected</button>
-                    </div>
-                </section>
-
-                <section class="explorer-tool-card">
-                    <div class="explorer-tool-head">
-                        <p class="eyebrow">Blu-ray Remux</p>
-                        <h3>Compile selected Blu-rays</h3>
-                        <p class="subtle">
-                            <strong>{{ media_backend.label }}</strong>
-                            {% if media_backend.reason %}
-                                - {{ media_backend.reason }}
-                            {% else %}
-                                - The main feature is chosen automatically and remuxed to MKV without re-encoding.
-                            {% endif %}
-                        </p>
-                    </div>
-                    <div class="explorer-field-grid">
-                        <div class="explorer-field">
-                            <label for="compile-destination">Output destination</label>
-                            <select id="compile-destination" name="destination" aria-label="Compile output destination">
-                                {% for destination in destinations %}
-                                    <option value="{{ destination.key }}" data-path="{{ destination.path }}">{{ destination.label }}</option>
-                                {% endfor %}
-                            </select>
-                            <p class="explorer-field-help" id="compile-destination-preview">
-                                {% if destinations %}Base path: {{ destinations[0].path }}{% else %}Choose an output destination.{% endif %}
-                            </p>
-                        </div>
-                        <div class="explorer-field explorer-field-wide">
-                            <label for="compile-destination-path">Output subfolder</label>
-                            <input
-                                type="text"
-                                id="compile-destination-path"
-                                name="destination_path"
-                                placeholder="Example: remuxes/new or /mnt/media/remuxes"
-                                aria-label="Compile output path"
-                            >
-                            <p class="explorer-field-help">Add a relative subfolder under the selected saved root.</p>
-                        </div>
-                    </div>
-                    <div class="explorer-tool-actions">
-                        <button
-                            type="submit"
-                            formaction="{{ url_for('add_favorite') }}"
-                            class="secondary-button"
-                            data-save-destination
-                            disabled
-                        >
-                            Add To Favorites
-                        </button>
-                        <button
-                            type="submit"
-                            formaction="{{ url_for('explorer_compile_bluray') }}"
-                            class="secondary-button"
-                            data-compile-action
-                            {% if not media_backend.available %}disabled{% endif %}
-                        >
-                            Compile Selected Blu-rays
-                        </button>
-                    </div>
-                </section>
-            </div>
-        </div>
-
-        <div class="explorer-table-header">
+    <header class="explorer-command-surface">
+        <div class="explorer-location-bar">
             <div>
-                <h3>Folder contents</h3>
-                <p class="subtle">Select items from the table, then use the action panels above.</p>
+                <p class="eyebrow">File Explorer</p>
+                <h2 id="explorer-title">{{ explorer.root.label }}</h2>
             </div>
-        </div>
-
-        <section class="explorer-status-panel">
-            <div class="explorer-table-header">
-                <div>
-                    <h3>Archive extraction status</h3>
-                    <p class="subtle" id="explorer-archive-summary">
-                        {{ explorer_archive_jobs|length }} related archive job(s) for this location.
-                    </p>
-                </div>
-                <button
-                    type="submit"
-                    formaction="{{ url_for('clear_archive_queue') }}"
-                    formmethod="post"
-                    class="danger-button compact-button"
-                >
-                    Clear Extraction Queue
-                </button>
-            </div>
-            <div
-                id="explorer-archive-job-list"
-                class="job-list explorer-job-list"
-                data-root="{{ explorer.root.key }}"
-                data-current-path="{{ explorer.current_path }}"
-                data-sort="{{ explorer.sort }}"
-            ></div>
-            <script id="initial-explorer-archives" type="application/json">{{ explorer_archive_jobs|tojson }}</script>
-        </section>
-
-        <div class="explorer-table-wrap">
-            <table class="explorer-table">
-                <thead>
-                    <tr>
-                        <th class="selection-cell">
-                            <input type="checkbox" id="select-all-entries" aria-label="Select all entries">
-                        </th>
-                        <th>Name</th>
-                        <th>Size</th>
-                        <th>Modified</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% if not explorer.entries %}
-                        <tr>
-                            <td colspan="5" class="empty-row">This folder is empty.</td>
-                        </tr>
-                    {% endif %}
-                    {% for entry in explorer.entries %}
-                        <tr>
-                            <td class="selection-cell">
-                                <input
-                                    type="checkbox"
-                                    name="selected_paths"
-                                    value="{{ entry.relative_path }}"
-                                    class="entry-select"
-                                    aria-label="Select {{ entry.name }}"
-                                >
-                            </td>
-                            <td>
-                                <div class="entry-name">
-                                    <span class="entry-icon">{{ "Folder" if entry.is_dir else "File" }}</span>
-                                    <strong>{{ entry.name }}</strong>
-                                </div>
-                            </td>
-                            <td>{{ entry.size|filesize if not entry.is_dir else "-" }}</td>
-                            <td>{{ entry.modified_at|datetime_local }}</td>
-                            <td>
-                                <div class="entry-action-stack">
-                                    <div class="entry-actions">
-                                        {% if entry.is_dir %}
-                                            <a class="ghost-button" href="{{ url_for('explorer', root=explorer.root.key, path=entry.relative_path, sort=explorer.sort) }}">Open Folder</a>
-                                        {% elif entry.is_archive %}
-                                            <form action="{{ url_for('unzip') }}" method="post" class="unzip-form">
-                                                <input type="hidden" name="root" value="{{ explorer.root.key }}">
-                                                <input type="hidden" name="sort" value="{{ explorer.sort }}">
-                                                <input type="hidden" name="archive_path" value="{{ entry.relative_path }}">
-                                                <input type="text" name="target_dir" placeholder="Extract folder">
-                                                <input type="password" name="password" placeholder="Password if needed">
-                                                <button type="submit">Extract {{ entry.archive_type.upper() if entry.archive_type else "Archive" }}</button>
-                                            </form>
-                                        {% endif %}
-                                    </div>
-                                    <form action="{{ url_for('explorer_rename') }}" method="post" class="rename-form">
-                                        <input type="hidden" name="root" value="{{ explorer.root.key }}">
-                                        <input type="hidden" name="current_path" value="{{ explorer.current_path }}">
-                                        <input type="hidden" name="sort" value="{{ explorer.sort }}">
-                                        <input type="hidden" name="entry_path" value="{{ entry.relative_path }}">
-                                        <input type="text" name="new_name" value="{{ entry.name }}" aria-label="Rename {{ entry.name }}">
-                                        <button type="submit" class="secondary-button">Rename</button>
-                                    </form>
-                                </div>
-                            </td>
-                        </tr>
+            <label class="explorer-root-picker" for="explorer-root-select">
+                <span>Root</span>
+                <select id="explorer-root-select">
+                    {% for destination in destinations %}
+                        <option value="{{ destination.key }}" {% if destination.key == explorer.root.key %}selected{% endif %}>
+                            {{ destination.label }}
+                        </option>
                     {% endfor %}
-                </tbody>
-            </table>
+                </select>
+            </label>
         </div>
-    </form>
+
+        <nav class="explorer-breadcrumbs" id="explorer-breadcrumbs" aria-label="Explorer breadcrumbs"></nav>
+
+        <div class="explorer-command-bar" role="toolbar" aria-label="Explorer actions">
+            <button type="button" class="secondary-button explorer-icon-button" data-action="refresh" title="Refresh">Refresh</button>
+            <button type="button" class="secondary-button explorer-icon-button" data-action="new-folder" title="New folder">New</button>
+            <button type="button" class="secondary-button explorer-icon-button" data-action="rename" title="Rename selected item" disabled>Rename</button>
+            <button type="button" class="secondary-button explorer-icon-button" data-action="move" title="Move selected items" disabled>Move</button>
+            <button type="button" class="secondary-button explorer-icon-button" data-action="extract" title="Extract selected archives" disabled>Extract</button>
+            <button type="button" class="secondary-button explorer-icon-button" data-action="remux" title="Compile selected Blu-rays" disabled>Remux</button>
+            <button type="button" class="danger-button explorer-icon-button" data-action="delete" title="Delete selected items" disabled>Delete</button>
+            <div class="explorer-search">
+                <label for="explorer-filter">Filter</label>
+                <input id="explorer-filter" type="search" autocomplete="off" placeholder="Name, type, extension">
+            </div>
+        </div>
+    </header>
+
+    <div class="explorer-layout">
+        <aside class="explorer-tree-panel" aria-label="Folder tree">
+            <div class="explorer-pane-head">
+                <h3>Folders</h3>
+                <button type="button" class="ghost-button compact-button" data-action="tree-refresh">Refresh</button>
+            </div>
+            <div id="explorer-tree" class="explorer-tree"></div>
+        </aside>
+
+        <main class="explorer-files-panel" aria-label="Folder contents">
+            <div class="explorer-pane-head explorer-files-head">
+                <div>
+                    <h3 id="explorer-folder-title">{{ explorer.current_label }}</h3>
+                    <p class="subtle" id="explorer-folder-summary">{{ explorer.entries|length }} item(s)</p>
+                </div>
+                <div class="explorer-view-controls">
+                    <button type="button" class="ghost-button compact-button" data-sort="name">Name</button>
+                    <button type="button" class="ghost-button compact-button" data-sort="type">Type</button>
+                    <button type="button" class="ghost-button compact-button" data-sort="size">Size</button>
+                    <button type="button" class="ghost-button compact-button" data-sort="modified">Modified</button>
+                </div>
+            </div>
+
+            <div class="explorer-table-wrap">
+                <table class="explorer-file-table" id="explorer-file-table">
+                    <thead>
+                        <tr>
+                            <th class="selection-cell">
+                                <input type="checkbox" id="explorer-select-all" aria-label="Select all visible entries">
+                            </th>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Size</th>
+                            <th>Modified</th>
+                        </tr>
+                    </thead>
+                    <tbody id="explorer-file-body"></tbody>
+                </table>
+            </div>
+            <div class="explorer-empty-state" id="explorer-empty-state" hidden>
+                <strong>No items here</strong>
+                <p class="subtle">The current folder is empty or filtered out.</p>
+            </div>
+        </main>
+
+        <aside class="explorer-details-panel" aria-label="Explorer details">
+            <div class="explorer-pane-head">
+                <h3>Details</h3>
+                <span class="status-pill" id="explorer-selection-count">0 selected</span>
+            </div>
+
+            <div class="explorer-detail-block">
+                <span class="explorer-summary-label">Current Folder</span>
+                <strong id="explorer-current-path">{{ explorer.current_label }}</strong>
+                <p class="subtle" id="explorer-current-root">{{ explorer.root.path }}</p>
+            </div>
+
+            <div class="explorer-detail-block">
+                <span class="explorer-summary-label">Selection</span>
+                <div id="explorer-selection-list" class="explorer-selection-list"></div>
+            </div>
+
+            <div class="explorer-detail-block">
+                <label for="explorer-move-target">Move target</label>
+                <div class="explorer-inline-control">
+                    <input id="explorer-move-target" type="text" placeholder="Target path">
+                    <button type="button" class="secondary-button compact-button" data-action="save-move-target">Save</button>
+                </div>
+                <select id="explorer-move-favorite">
+                    <option value="">Saved move target</option>
+                </select>
+            </div>
+
+            <div class="explorer-detail-block">
+                <span class="explorer-summary-label">Archive defaults</span>
+                <label class="checkbox-label" for="explorer-auto-sort">
+                    <input type="checkbox" id="explorer-auto-sort">
+                    Auto-sort extracted videos
+                </label>
+                <label class="checkbox-label" for="explorer-auto-delete">
+                    <input type="checkbox" id="explorer-auto-delete">
+                    Auto-delete archives after move
+                </label>
+            </div>
+
+            <div class="explorer-detail-block">
+                <label for="explorer-remux-destination">Remux destination</label>
+                <select id="explorer-remux-destination"></select>
+                <input id="explorer-remux-path" type="text" placeholder="Optional output subfolder">
+                <p class="subtle" id="explorer-media-status"></p>
+            </div>
+        </aside>
+    </div>
+
+    <section class="explorer-status-panel">
+        <div class="explorer-pane-head">
+            <div>
+                <h3>Archive extraction status</h3>
+                <p class="subtle" id="explorer-archive-summary">
+                    {{ explorer_archive_jobs|length }} related archive job(s) for this location.
+                </p>
+            </div>
+            <button type="button" class="danger-button compact-button" data-action="clear-archive-queue">
+                Clear Queue
+            </button>
+        </div>
+        <div
+            id="explorer-archive-job-list"
+            class="job-list explorer-job-list"
+            data-root="{{ explorer.root.key }}"
+            data-current-path="{{ explorer.current_path }}"
+            data-sort="{{ explorer.sort }}"
+        ></div>
+    </section>
+
+    <div class="explorer-toast-stack" id="explorer-toast-stack" aria-live="polite"></div>
+
+    <div class="explorer-modal" id="explorer-modal" hidden aria-hidden="true">
+        <div class="explorer-modal-backdrop" data-action="modal-cancel"></div>
+        <section class="explorer-modal-panel" role="dialog" aria-modal="true" aria-labelledby="explorer-modal-title">
+            <h3 id="explorer-modal-title"></h3>
+            <div id="explorer-modal-body" class="explorer-modal-body"></div>
+            <div class="explorer-modal-actions">
+                <button type="button" class="ghost-button" data-action="modal-cancel">Cancel</button>
+                <button type="button" id="explorer-modal-confirm">Confirm</button>
+            </div>
+        </section>
+    </div>
+
+    <div class="explorer-context-menu" id="explorer-context-menu" hidden>
+        <button type="button" data-context-action="open">Open</button>
+        <button type="button" data-context-action="rename">Rename</button>
+        <button type="button" data-context-action="move">Move</button>
+        <button type="button" data-context-action="extract">Extract</button>
+        <button type="button" data-context-action="remux">Remux</button>
+        <button type="button" data-context-action="delete" class="danger-text">Delete</button>
+    </div>
 </section>
 
 <script src="{{ url_for('static', filename='explorer.js') }}" defer></script>

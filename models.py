@@ -187,6 +187,13 @@ class ExplorerEntry:
     is_zip: bool = False
     is_archive: bool = False
     archive_type: str | None = None
+    entry_type: str = "file"
+    extension: str = ""
+    is_symlink: bool = False
+    can_extract: bool = False
+    can_compile_bluray: bool = False
+    can_rename: bool = True
+    can_delete: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

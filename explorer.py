@@ -97,6 +97,45 @@ def validate_entry_name(name: str) -> str:
     return cleaned
 
 
+def is_bluray_directory(path: Path) -> bool:
+    return path.is_dir() and (path / "BDMV" / "index.bdmv").is_file()
+
+
+def entry_type_for_path(path: Path, *, archive_type: str | None = None) -> str:
+    if path.is_dir():
+        return "bluray" if is_bluray_directory(path) else "folder"
+    if archive_type:
+        return "archive"
+    return "file"
+
+
+def create_directory(
+    destinations: dict[str, dict],
+    root_key: str,
+    current_relative_path: str,
+    name: str,
+    *,
+    permission_manager=None,
+) -> dict:
+    root_info = resolve_root(destinations, root_key)
+    root = root_info["path"]
+    current_dir = path_within_root(root, current_relative_path)
+    if not current_dir.exists() or not current_dir.is_dir():
+        raise FileNotFoundError("Requested folder does not exist.")
+    validated_name = validate_entry_name(name)
+    target_path = path_within_root(root, Path(relative_to_root(root, current_dir)) / validated_name)
+    if target_path.exists():
+        raise ValueError(f"'{validated_name}' already exists in this folder.")
+    target_path.mkdir()
+    if permission_manager:
+        permission_manager.grant(target_path, recursive=True, feature="explorer_mkdir")
+    return {
+        "name": validated_name,
+        "relative_path": relative_to_root(root, target_path),
+        "path": str(target_path),
+    }
+
+
 def resolve_entries_in_directory(
     destinations: dict[str, dict],
     root_key: str,
@@ -111,11 +150,14 @@ def resolve_entries_in_directory(
     resolved_entries: list[tuple[str, Path]] = []
     seen: set[str] = set()
     for raw_relative_path in relative_paths:
+        raw_text = str(raw_relative_path or "").strip()
         relative_path = normalize_relative_path(raw_relative_path)
-        if not relative_path or relative_path in seen:
+        if not relative_path and raw_text not in {".", "./"}:
+            continue
+        if relative_path in seen:
             continue
 
-        entry_path = path_within_root(root, relative_path)
+        entry_path = root if not relative_path else path_within_root(root, relative_path)
         if entry_path == root:
             raise ValueError("The configured explorer root cannot be modified.")
 
@@ -333,11 +375,62 @@ def build_breadcrumbs(root_key: str, relative_path: str) -> list[dict]:
     return breadcrumbs
 
 
+def _root_payload(root_info: dict) -> dict:
+    return {
+        "key": root_info["key"],
+        "label": root_info["label"],
+        "path": str(root_info["path"]),
+    }
+
+
+def _directory_has_children(path: Path) -> bool:
+    try:
+        return any(child.is_dir() for child in path.iterdir())
+    except OSError:
+        return False
+
+
+def list_directory_tree(
+    destinations: dict[str, dict],
+    root_key: str,
+    relative_path: str = "",
+) -> dict:
+    root_info = resolve_root(destinations, root_key)
+    root = root_info["path"]
+    current_path = path_within_root(root, relative_path)
+    if not current_path.exists() or not current_path.is_dir():
+        raise FileNotFoundError("Requested folder does not exist.")
+
+    directories: list[dict] = []
+    for child in current_path.iterdir():
+        if not child.is_dir():
+            continue
+        directories.append(
+            {
+                "name": child.name,
+                "relative_path": relative_to_root(root, child),
+                "has_children": _directory_has_children(child),
+                "can_drop": True,
+            }
+        )
+    directories.sort(key=lambda item: item["name"].lower())
+
+    current_relative = relative_to_root(root, current_path)
+    return {
+        "root": _root_payload(root_info),
+        "current_path": current_relative,
+        "parent_path": "" if current_relative == "" else relative_to_root(root, current_path.parent),
+        "directories": directories,
+        "breadcrumbs": build_breadcrumbs(root_key, current_relative),
+    }
+
+
 def list_directory(
     destinations: dict[str, dict],
     root_key: str,
     relative_path: str = "",
     sort_by: str = "name",
+    sort_order: str = "asc",
 ) -> dict:
     root_info = resolve_root(destinations, root_key)
     root = root_info["path"]
@@ -350,6 +443,7 @@ def list_directory(
         stats = child.stat()
         modified_at = datetime.fromtimestamp(stats.st_mtime, tz=timezone.utc).astimezone().isoformat()
         archive_type = archive_type_for_path(child) if child.is_file() else None
+        entry_type = entry_type_for_path(child, archive_type=archive_type)
         entries.append(
             ExplorerEntry(
                 name=child.name,
@@ -360,28 +454,41 @@ def list_directory(
                 is_zip=archive_type == "zip",
                 is_archive=archive_type is not None,
                 archive_type=archive_type,
+                entry_type=entry_type,
+                extension=child.suffix.lower().lstrip(".") if child.is_file() else "",
+                is_symlink=child.is_symlink(),
+                can_extract=archive_type is not None,
+                can_compile_bluray=entry_type == "bluray",
             )
         )
 
-    def sort_key(entry: ExplorerEntry):
+    def sort_value(entry: ExplorerEntry):
         if sort_by == "size":
-            return (not entry.is_dir, -(entry.size or 0), entry.name.lower())
+            return (entry.size or 0, entry.name.lower())
         if sort_by == "modified":
-            return (not entry.is_dir, entry.modified_at or "", entry.name.lower())
-        return (not entry.is_dir, entry.name.lower())
+            return (entry.modified_at or "", entry.name.lower())
+        if sort_by == "type":
+            return (entry.entry_type, entry.extension, entry.name.lower())
+        return (entry.name.lower(),)
 
-    entries.sort(key=sort_key)
+    reverse = sort_order == "desc"
+    directories = [entry for entry in entries if entry.is_dir]
+    files = [entry for entry in entries if not entry.is_dir]
+    directories.sort(key=sort_value, reverse=reverse)
+    files.sort(key=sort_value, reverse=reverse)
+    entries = directories + files
     parent_path = ""
     current_relative = relative_to_root(root, current_path)
     if relative_path:
         parent_path = relative_to_root(root, current_path.parent)
 
     return {
-        "root": root_info,
+        "root": _root_payload(root_info),
         "current_path": current_relative,
         "current_label": current_relative or root_info["label"],
         "parent_path": parent_path,
         "entries": [entry.to_dict() for entry in entries],
         "breadcrumbs": build_breadcrumbs(root_key, current_relative),
         "sort": sort_by,
+        "order": sort_order,
     }
