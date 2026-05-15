@@ -184,7 +184,8 @@ v1 behavior:
 - Output is a lossless MKV remux with all tracks kept
 - Output goes to a saved destination root plus an optional relative subfolder
 - Existing output files are not overwritten
-- Completed jobs are verified with MediaInfo, and the dashboard records Dolby Vision and Dolby Atmos when present
+- Completed jobs are verified with MediaInfo, and the dashboard records Dolby Vision / Atmos preservation signals when present
+- MediaInfo verification is not a final playback-chain test. It does not prove that a Plex client, player, display, AVR, or soundbar can decode Dolby Vision FEL or bitstream TrueHD Atmos.
 
 If either `makemkvcon` or `mediainfo` is missing, the dashboard and explorer show `Blu-ray backend unavailable` with the reason instead of queueing broken jobs.
 

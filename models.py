@@ -401,8 +401,16 @@ class AutoExtractSet:
 
 @dataclass(slots=True)
 class MediaVerification:
+    # Backward-compatible aliases for older saved jobs and existing callers.
     dolby_vision: bool = False
     dolby_atmos: bool = False
+    dolby_vision_preserved: bool = False
+    dolby_vision_profile: str | None = None
+    dolby_vision_enhancement_layer: str | None = None
+    dolby_atmos_preserved: bool = False
+    truehd_atmos_preserved: bool = False
+    playback_client_verified: bool = False
+    playback_verification_note: str | None = None
     video_codec: str | None = None
     audio_codec: str | None = None
     verified_at: str | None = None
@@ -413,9 +421,18 @@ class MediaVerification:
     @classmethod
     def from_dict(cls, data: dict | None) -> "MediaVerification":
         payload = data or {}
+        dolby_vision_preserved = bool(payload.get("dolby_vision_preserved", payload.get("dolby_vision", False)))
+        dolby_atmos_preserved = bool(payload.get("dolby_atmos_preserved", payload.get("dolby_atmos", False)))
         return cls(
-            dolby_vision=bool(payload.get("dolby_vision", False)),
-            dolby_atmos=bool(payload.get("dolby_atmos", False)),
+            dolby_vision=bool(payload.get("dolby_vision", False)) or dolby_vision_preserved,
+            dolby_atmos=bool(payload.get("dolby_atmos", False)) or dolby_atmos_preserved,
+            dolby_vision_preserved=dolby_vision_preserved,
+            dolby_vision_profile=payload.get("dolby_vision_profile"),
+            dolby_vision_enhancement_layer=payload.get("dolby_vision_enhancement_layer"),
+            dolby_atmos_preserved=dolby_atmos_preserved,
+            truehd_atmos_preserved=bool(payload.get("truehd_atmos_preserved", False)),
+            playback_client_verified=bool(payload.get("playback_client_verified", False)),
+            playback_verification_note=payload.get("playback_verification_note"),
             video_codec=payload.get("video_codec"),
             audio_codec=payload.get("audio_codec"),
             verified_at=payload.get("verified_at"),

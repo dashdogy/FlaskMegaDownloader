@@ -441,11 +441,22 @@
 
     const renderVerificationBadges = (verification) => {
         const badges = [];
-        if (verification?.dolby_vision) {
-            badges.push('<span class="status-pill completed">Dolby Vision</span>');
+        const hasDolbyVision = Boolean(verification?.dolby_vision_preserved || verification?.dolby_vision);
+        const hasDolbyAtmos = Boolean(verification?.dolby_atmos_preserved || verification?.dolby_atmos);
+        if (hasDolbyVision) {
+            const profile = verification?.dolby_vision_profile ? ` P${verification.dolby_vision_profile}` : "";
+            const layer = verification?.dolby_vision_enhancement_layer ? ` ${verification.dolby_vision_enhancement_layer}` : "";
+            badges.push(`<span class="status-pill completed">${escapeHtml(`Dolby Vision preserved${profile}${layer}`)}</span>`);
         }
-        if (verification?.dolby_atmos) {
-            badges.push('<span class="status-pill completed">Dolby Atmos</span>');
+        if (verification?.truehd_atmos_preserved) {
+            badges.push('<span class="status-pill completed">TrueHD Atmos preserved</span>');
+        } else if (hasDolbyAtmos) {
+            badges.push('<span class="status-pill completed">Dolby Atmos preserved</span>');
+        }
+        if (hasDolbyVision || hasDolbyAtmos) {
+            const playbackClass = verification?.playback_client_verified ? "completed" : "warning";
+            const playbackLabel = verification?.playback_client_verified ? "Playback verified" : "Playback not verified";
+            badges.push(`<span class="status-pill ${playbackClass}">${playbackLabel}</span>`);
         }
         if (verification?.video_codec) {
             badges.push(`<span class="status-pill">${escapeHtml(verification.video_codec)}</span>`);
@@ -453,7 +464,12 @@
         if (verification?.audio_codec) {
             badges.push(`<span class="status-pill">${escapeHtml(verification.audio_codec)}</span>`);
         }
-        return badges.join("");
+        const note = verification?.playback_verification_note && (hasDolbyVision || hasDolbyAtmos)
+            ? `<p class="media-verification-note">${escapeHtml(verification.playback_verification_note)}</p>`
+            : "";
+        return badges.length || note
+            ? `<div class="media-verification-stack">${badges.join("")}${note}</div>`
+            : "";
     };
 
     const renderMediaJob = (job) => {

@@ -37,6 +37,9 @@ TINFO_SOURCE_FILE_IDS = {"16"}
 TINFO_OUTPUT_FILENAME_IDS = {"27"}
 TINFO_TREE_INFO_IDS = {"30"}
 TEXT_SIZE_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[KMGTP]?i?B)", re.IGNORECASE)
+DOLBY_VISION_PROFILE_RE = re.compile(r"\bdv(?:he|h1|av)?\.0?(?P<profile>\d{1,2})\b", re.IGNORECASE)
+DOLBY_VISION_TEXT_PROFILE_RE = re.compile(r"\bprofile\s*0?(?P<profile>\d{1,2})\b", re.IGNORECASE)
+TRUEHD_ATMOS_MARKERS = ("truehd", "mlp fba")
 
 
 class MediaCompileError(Exception):
@@ -240,13 +243,60 @@ def human_scan_summary(titles: Iterable[TitleInfo]) -> str:
     return ", ".join(labels) or "no titles found"
 
 
+def _media_track_text(track: dict) -> str:
+    return " ".join(str(value) for value in track.values() if value is not None)
+
+
+def _find_dolby_vision_profile(track_text: str) -> str | None:
+    for pattern in (DOLBY_VISION_PROFILE_RE, DOLBY_VISION_TEXT_PROFILE_RE):
+        match = pattern.search(track_text)
+        if match:
+            return str(int(match.group("profile")))
+    return None
+
+
+def _find_dolby_vision_enhancement_layer(track_text: str) -> str | None:
+    lowered = track_text.lower()
+    if "full enhancement layer" in lowered or re.search(r"\bfel\b", lowered):
+        return "FEL signaled"
+    if "minimum enhancement layer" in lowered or re.search(r"\bmel\b", lowered):
+        return "MEL signaled"
+    if "bl+el+rpu" in lowered:
+        return "EL present"
+    return None
+
+
+def _playback_verification_note(verification: MediaVerification) -> str:
+    preserved: list[str] = []
+    if verification.dolby_vision_preserved:
+        label = "Dolby Vision"
+        if verification.dolby_vision_profile:
+            label += f" profile {verification.dolby_vision_profile}"
+        if verification.dolby_vision_enhancement_layer:
+            label += f" ({verification.dolby_vision_enhancement_layer})"
+        preserved.append(label)
+    if verification.truehd_atmos_preserved:
+        preserved.append("TrueHD Atmos")
+    elif verification.dolby_atmos_preserved:
+        preserved.append("Dolby Atmos")
+
+    if not preserved:
+        return "MediaInfo completed against the MKV output. No playback client decode or bitstream test was run."
+
+    return (
+        f"MediaInfo confirms {' and '.join(preserved)} preservation signals are present in the MKV remux. "
+        "This does not prove a playback client can decode Dolby Vision FEL or bitstream TrueHD Atmos; "
+        "validate the final Plex, device, and AVR or soundbar chain separately."
+    )
+
+
 def parse_mediainfo_json(raw_json: str) -> MediaVerification:
     payload = json.loads(raw_json or "{}")
     tracks = payload.get("media", {}).get("track", [])
     verification = MediaVerification(verified_at=utcnow_iso())
     for track in tracks:
         track_type = str(track.get("@type") or "").lower()
-        values = " ".join(str(value) for value in track.values() if value is not None)
+        values = _media_track_text(track)
         lowered = values.lower()
         if track_type == "video" and verification.video_codec is None:
             verification.video_codec = (
@@ -261,9 +311,19 @@ def parse_mediainfo_json(raw_json: str) -> MediaVerification:
                 or track.get("CodecID")
             )
         if track_type == "video" and "dolby vision" in lowered:
-            verification.dolby_vision = True
+            verification.dolby_vision_preserved = True
+            verification.dolby_vision_profile = verification.dolby_vision_profile or _find_dolby_vision_profile(values)
+            verification.dolby_vision_enhancement_layer = (
+                verification.dolby_vision_enhancement_layer or _find_dolby_vision_enhancement_layer(values)
+            )
         if track_type == "audio" and "atmos" in lowered:
-            verification.dolby_atmos = True
+            verification.dolby_atmos_preserved = True
+            if any(marker in lowered for marker in TRUEHD_ATMOS_MARKERS):
+                verification.truehd_atmos_preserved = True
+    verification.dolby_vision = verification.dolby_vision_preserved
+    verification.dolby_atmos = verification.dolby_atmos_preserved
+    verification.playback_client_verified = False
+    verification.playback_verification_note = _playback_verification_note(verification)
     return verification
 
 
@@ -821,8 +881,12 @@ class MediaCompileManager:
             job=job,
             context={
                 "output_file_path": str(final_output_file_path),
-                "dolby_vision": verification.dolby_vision,
-                "dolby_atmos": verification.dolby_atmos,
+                "dolby_vision_preserved": verification.dolby_vision_preserved,
+                "dolby_vision_profile": verification.dolby_vision_profile,
+                "dolby_vision_enhancement_layer": verification.dolby_vision_enhancement_layer,
+                "dolby_atmos_preserved": verification.dolby_atmos_preserved,
+                "truehd_atmos_preserved": verification.truehd_atmos_preserved,
+                "playback_client_verified": verification.playback_client_verified,
             },
         )
 

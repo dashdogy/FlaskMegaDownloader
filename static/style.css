@@ -583,6 +583,22 @@ button:disabled {
 
 .media-verification-row {
     gap: 8px;
+    align-items: flex-start;
+}
+
+.media-verification-stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.media-verification-note {
+    flex-basis: 100%;
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.86rem;
+    line-height: 1.45;
 }
 
 .danger-button {
